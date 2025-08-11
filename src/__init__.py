@@ -32,7 +32,7 @@ from Tools.Directories import resolveFilename, SCOPE_PLUGINS
 from enigma import getDesktop
 from urllib.parse import parse_qsl, quote_plus, urlparse
 
-__version__ = "20250731"
+__version__ = "20250801"
 
 PluginLanguageDomain = "PlutoTV"
 PluginLanguagePath = "Extensions/PlutoTV/locale"
