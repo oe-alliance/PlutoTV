@@ -3,7 +3,7 @@ name: Create Tag and Release on Version Change
 on:
   push:
     paths:
-      - src/__init__.py
+      - src/PlutoTV/__init__.py
     branches:
       - main
 
@@ -22,7 +22,7 @@ jobs:
       - name: Read version from file
         id: get_version
         run: |
-          VERSION=$(grep -oP '(?<=__version__ = ")[^"]+' src/__init__.py)
+          VERSION=$(grep -oP '(?<=__version__ = ")[^"]+' src/PlutoTV/__init__.py)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Check if tag already exists
