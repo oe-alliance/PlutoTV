@@ -179,7 +179,7 @@ config.plugins.plutotv.service_5 = ConfigSelection(default="4097", choices=SERVI
 
 X_FORWARDS = {
 	"us": "185.236.200.172",  # NOSONAR
-#	"uk": "185.86.151.11",
+# "uk": "185.86.151.11",
 	"uk": "185.199.220.58",  # NOSONAR
 	"de": "85.214.132.117",  # NOSONAR
 	"es": "88.26.241.248",  # NOSONAR

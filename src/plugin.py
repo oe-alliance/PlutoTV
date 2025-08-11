@@ -394,7 +394,6 @@ class PlutoTV(Screen):
 		except Exception as err:
 			print("[PlutoTV] Error saving favorites: ", err)
 
-
 	def showback(self, picInfo=None):
 		try:
 			ptr = self.picload.getData()
@@ -428,7 +427,6 @@ class PlutoTV(Screen):
 			_list = [listentry(key, "menu", "", region=region) for key in iter(self.menu)]
 			self["feedlist"].setList(_list)
 			self["loading"].hide()
-
 
 	def buildlist(self, categorie, region):
 		name = categorie["name"]
@@ -483,7 +481,6 @@ class PlutoTV(Screen):
 					region,
 				)
 			)
-
 
 	def update_data(self):
 		if len(self["feedlist"].list) == 0:
@@ -850,8 +847,6 @@ class PlutoTV(Screen):
 					self["feedlist"].setList(self["feedlist"].list)
 				print("[PlutoTV] Favorite deleted:", name)
 
-
-
 	def restartEnigma2(self, e2_restart=False, pluto_restart=False):
 		if pluto_restart:
 			if self.oldService:
@@ -864,6 +859,7 @@ class PlutoTV(Screen):
 
 	def openPlutoSettings(self, callback=None):
 		self.session.openWithCallback(self.restartEnigma2, PlutoTVConfig)
+
 
 class Pluto_Player(MoviePlayer):
 
@@ -956,8 +952,6 @@ class Pluto_Player(MoviePlayer):
 
 	def exit(self):
 		self.callbackexit(True)
-
-
 
 
 class _ConfigList(ConfigList):
