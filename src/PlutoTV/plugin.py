@@ -1,1213 +1,2296 @@
-# -*- coding: utf-8 -*-
-#
-#   Copyright (C) 2021 Team OpenSPA
-#   https://openspa.info/
-#
-#   Copyright (c) 2021-2024 Billy2011 @ vuplus-support.org
-#   20210618 (1st release)
-#   - adaptions for VTI
-#   - many fixes, improvements, mods & rewrites
-#   - py3 adaption
-#   20240831 (latest release)
-#
-#   Copyright (c) 2025 jbleyel
-#   20250731 (release)
-#   - remove python2 code
-#   - remove twisted downloadPage
-#
-#   SPDX-License-Identifier: GPL-2.0-or-later
-#   See LICENSES/README.md for more information.
-#
-#   PlutoTV is free software: you can redistribute it and/or modify
-#   it under the terms of the GNU General Public License as published by
-#   the Free Software Foundation, either version 3 of the License, or
-#   (at your option) any later version.
-#
-#   PlutoTV is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU General Public License for more details.
-#
-#   You should have received a copy of the GNU General Public License
-#   along with PlutoTV.  If not, see <http://www.gnu.org/licenses/>.
-#
+"""
+Copyright (C) 2021 Team OpenSPA
+https://openspa.info/
 
-import os
-from pickle import load, dump
-from time import gmtime, localtime, strftime, time
-from urllib.parse import urljoin, urlparse
+Copyright (c) 2021-2024 Billy2011 @ vuplus-support.org
+20210618 (1st release)
+- adaptions for VTI
+- many fixes, improvements, mods & rewrites
+- py3 adaption
 
-from Components.ActionMap import ActionMap
-from Components.ConfigList import ConfigList, ConfigListScreen
+20240831 (latest release)
+
+Copyright (c) 2025 jbleyel and IanSav
+
+3.0
+Rewrite Pluto TV plugin
+- Rewrite and optimize all aspects of the Pluto TV plugin.
+- All the code is now in one module.
+- Move all bouquet updating to a detached background thread.
+- Move the list of supported regions into an upgradeable XML file.
+- Make the Setup functions a sub-class of Setup.
+- Make the screens fully skin-able.
+- Add an option, via TEXT button, to temporarily view the content for any supported region.
+- Make the content list configurable via a skin.
+- Show the number of items in each sub menu.
+- Add options for how to display the show/movie details.  Allow the elements of the details to be colored via a skin.
+- Add dynamic HELP.
+- Allow favorites to be defined separately for each region.
+- Improve the management of region bouquets.
+- Allow Pluto TV to be added to the main menu.
+- Make the pop up to confirm plugin close as optional, now defaulted to off (No).
+- Make the background bouquet update period configurable.
+- Allow the use of "#DESCRIPTION" lines in bouquets to be optional.
+- Manual updates for the bouquets is now within the Setup screen.
+- Add an option to use LEFT/RIGHT buttons for navigation.
+- Probably more that no longer stands out after all the development time.  ;)
+
+ SPDX-License-Identifier: GPL-2.0-or-later
+ See LICENSES/README.md for more information.
+
+ PlutoTV is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or
+ (at your option) any later version.
+
+ PlutoTV is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with PlutoTV.  If not, see <http://www.gnu.org/licenses/>.
+"""
+
+from os import makedirs, statvfs
+from os.path import exists, getsize, isdir, isfile, join
+from pickle import dump, load
+from re import sub
+from requests import get
+from shutil import copy2
+from time import gmtime, localtime, mktime, sleep, strftime, strptime, time
+from traceback import format_exc
+from twisted.internet import defer, reactor, threads
+from unicodedata import normalize
+from urllib.parse import parse_qsl, quote_plus, urljoin, urlparse
+from uuid import uuid4, uuid1
+
+from enigma import eDVBDB, eEPGCache, ePicLoad, eServiceCenter, eServiceReference, eTimer, gRGB, iPlayableService
+
+from skin import parseColor
+from Components.ActionMap import HelpableActionMap
+from Components.config import ConfigDirectory, ConfigNumber, ConfigSelection, ConfigSubList, ConfigSubsection, ConfigYesNo, config, getConfigListEntry
+try:
+	from Components.International import international
+except ImportError:
+	international = None
 from Components.Label import Label
-from Components.MenuList import MenuList
-from Components.MultiContent import MultiContentEntryPixmapAlphaBlend, MultiContentEntryText
 from Components.Pixmap import Pixmap
+from Components.ProgressBar import ProgressBar
 from Components.ServiceEventTracker import ServiceEventTracker
+from Components.Sources.List import List
 from Components.Sources.StaticText import StaticText
-from Components.config import ConfigElement, ConfigSelection, ConfigYesNo, config, getConfigListEntry
-from Plugins.Extensions.PlutoTV import downloader
 from Plugins.Plugin import PluginDescriptor
+try:
+	from Plugins.Extensions.IMDb.plugin import main as imdb
+	imdbAvailable = True
+except ImportError:
+	imdbAvailable = False
+try:
+	from Plugins.Extensions.tmdb import tmdb
+	tmdbAvailable = True
+except ImportError:
+	tmdbAvailable = False
 from Screens.InfoBar import MoviePlayer
 from Screens.MessageBox import MessageBox
 from Screens.Screen import Screen
-from Tools import Notifications
-from enigma import eListboxPythonMultiContent, ePicLoad, eServiceReference, eTimer, gFont, getDesktop, iPlayableService
+from Screens.Setup import Setup
+from Tools.Directories import SCOPE_CONFIG, SCOPE_GUISKIN, SCOPE_PLUGIN_ABSOLUTE, fileReadLine, fileReadLines, fileReadXML, fileWriteLine, fileWriteLines, resolveFilename
+from Tools.LoadPixmap import LoadPixmap
+from Tools.Notifications import AddNotificationWithCallback
 
-from . import PlutoDownload, _, bigStorage, update_qsd
+from . import _, __version__
 
-try:
-	from Plugins.Extensions.tmdb import tmdb
+MODULE_NAME = __name__.split(".")[-1]
 
-	is_tmdb = True
-except Exception:
-	is_tmdb = False
+PLUTO_USER_AGENT = {"User-agent": "Mozilla/5.0 (Windows NT 6.2; rv:24.0) Gecko/20100101 Firefox/24.0"}
+PLUTO_IMAGE_URL = "https://images.pluto.tv"
+PLUTO_API_URL = "https://api.pluto.tv"
+PLUTO_VOD_URL = f"{PLUTO_API_URL}/v3/vod/categories"
+PLUTO_GUIDE_URL = f"{PLUTO_API_URL}/v2/channels"
+PLUTO_LINEUP_URL = f"{PLUTO_API_URL}/v2/channels"
+PLUTO_SEASON_URL = f"{PLUTO_API_URL}/v3/vod/series/%s/seasons"
+GUIDE_URL = "https://service-channels.clusters.pluto.tv/v1/guide"
 
-try:
-	from Plugins.Extensions.IMDb.plugin import main as imdb
+PLUTO_FOLDER = "/tmp"
+PLUTO_TIMER_PATH = "/etc/enigma2/PlutoTV_timer"
+PLUTO_SERVICE_NUMBER_PATH = "/etc/enigma2/PlutoTV_numbers"
 
-	is_imdb = True
-except Exception:
-	is_imdb = False
+SID1_HEX = str(uuid4().hex)  # Defined as a global to save time.
+DEVICEID1_HEX = str(uuid1().hex)  # Defined as a global to save time.
 
-screenWidth = getDesktop(0).size().width()
-
-config.plugins.plutotv.silentmode = ConfigYesNo(default=True)
-
-
-def fhd(num, factor=1.5):
-	return int(round(num * factor)) if screenWidth and screenWidth == 1920 else num
-
-
-def setResumePoint(session, sid=None):
-	global resumePointCache
-	service = session.nav.getCurrentService()
-	ref = session.nav.getCurrentlyPlayingServiceReference()
-	if (service is not None) and (ref is not None):
-		seek = service.seek()
-		if seek:
-			pos = seek.getPlayPosition()
-			if not pos[0]:
-				key = sid
-				lru = int(time())
-				_l = seek.getLength()
-				if _l:
-					_l = _l[1]
-				else:
-					_l = None
-				position = pos[1]
-				resumePointCache[key] = [lru, position, _l]
-				saveResumePoints(sid)
-
-
-def getResumePoint(sid):
-	global resumePointCache
-	resumePointCache = loadResumePoints(sid)
-	if sid is not None:
-		try:
-			entry = resumePointCache[sid]
-			entry[0] = int(time())  # update LRU timestamp
-			last = entry[1]
-			length = entry[2]
-		except KeyError:
-			last = None
-			length = 0
-	return last, length
-
-
-def saveResumePoints(sid):
-	global resumePointCache
-	name = os.path.join(FOLDER, sid) + ".cue"
-
-	try:
-		f = open(name, "wb")
-		dump(resumePointCache, f, protocol=5)
-	except Exception as err:
-		print("[PlutoTV] Failed to write resumepoints: {}".format(err))
-
-
-def loadResumePoints(sid):
-	name = os.path.join(FOLDER, sid) + ".cue"
-
-	try:
-		return load(open(name, "rb"))
-	except Exception as err:
-		print("[PlutoTV] Failed to load resumepoints: {}".format(err))
-		return {}
-
-
-resumePointCache = {}
-
-FOLDER = os.path.join(bigStorage(500 * 10 ** 6, "/tmp", "/media/hdd", "/media/usb", "/media/cf", "/media/mmc"), "PlutoTV")
-if not os.path.exists(FOLDER):
-	os.makedirs(FOLDER)
-
-DownloadPosters = downloader.PlutoDownloader
-
-
-class SelList(MenuList):
-	def __init__(self, _list, enableWrapAround=False):
-		MenuList.__init__(self, _list, enableWrapAround, eListboxPythonMultiContent)
-		self.l.setItemHeight(fhd(35))
-		self.l.setFont(0, gFont("Regular", fhd(19)))
+PLUTO_COUNTRY_NAME = 0
+PLUTO_IP = 1
+PLUTO_TIDS = 2
+PLUTO_DATA = {
+	"AUTO": (_("* Automatic *"), "", "0")
+}
+PLUTO_SERVICE_CHOICES = [
+	("4097", f"{_("Original")} (4097)"),
+	("5001", "ServiceGstPlayer (5001)"),
+	("5002", "ServiceExtPlayer3 (5002)"),
+]
+config.plugins.PlutoTV = ConfigSubsection()
+config.plugins.PlutoTV.addToMainMenu = ConfigYesNo(default=False)
+config.plugins.PlutoTV.addToExtensionMenu = ConfigYesNo(default=False)
+config.plugins.PlutoTV.addUpdateToExtensionMenu = ConfigYesNo(default=False)
+config.plugins.PlutoTV.confirmClose = ConfigYesNo(default=False)
+config.plugins.PlutoTV.updateTimer = ConfigSelection(default=5, choices=[
+	(0, _("Updates disabled"))
+] + [
+	(x, ngettext("%d Hour", "%d Hours", x) % x) for x in range(1, 25)
+])
+config.plugins.PlutoTV.silentMode = ConfigYesNo(default=True)
+config.plugins.PlutoTV.addXiaomi = ConfigYesNo(default=False)
+config.plugins.PlutoTV.addSamsung = ConfigYesNo(default=True)
+config.plugins.PlutoTV.channelNumbering = ConfigSelection(default="original", choices=[
+	("original", _("Original")),
+	("plugin", _("Plugin generated"))
+])
+config.plugins.PlutoTV.liveMode = ConfigSelection(default="samsung", choices=[
+	("original", _("Original")),
+	("roku", "Roku TV"),
+	("samsung", "Samsung TV")
+])
+domData = fileReadXML(resolveFilename(SCOPE_PLUGIN_ABSOLUTE, "plutotv.xml"), default=None, source=MODULE_NAME)
+choices = []
+if domData is not None:
+	for region in domData.findall("region"):
+		country = region.get("country")
+		name = international.getCountryTranslated(country) if international else region.get("country")
+		ip = region.get("ip")
+		tids = region.get("tids")
+		if country and name and ip and tids:
+			PLUTO_DATA[country] = (name, ip, tids)
+			choices.append((country, name))
+	choices.sort(key=lambda x: x[1])
+	print(f"[PlutoTV] Data for {len(PLUTO_DATA)} regions loaded.")
+else:
+	print("[PlutoTV] Error: No region data loaded!")
+choices.insert(0, ("AUTO", _("* Automatic *")))
+config.plugins.PlutoTV.region = ConfigSelection(default="AUTO", choices=choices)
+config.plugins.PlutoTV.bouquetCount = ConfigNumber(default=0)
+config.plugins.PlutoTV.bouquetRegion = ConfigSubList()
+config.plugins.PlutoTV.bouquetService = ConfigSubList()
+for count in range(config.plugins.PlutoTV.bouquetCount.value):
+	config.plugins.PlutoTV.bouquetRegion.append(ConfigSelection(default="AUTO", choices=choices))
+	config.plugins.PlutoTV.bouquetService.append(ConfigSelection(default="4097", choices=PLUTO_SERVICE_CHOICES))
+choices = [("NONE", _("None"))] + choices
+config.plugins.PlutoTV.piconMode = ConfigSelection(default="srp", choices=[
+	("srp", _("Reference")),
+	("name", _("Name")),
+	("snp", _("SNP"))
+])
+# config.plugins.PlutoTV.piconPath = ConfigDirectory(default="/usr/share/enigma2/picon")
+config.plugins.PlutoTV.piconPath = ConfigSelection(default="/usr/share/enigma2/picon", choices=["/usr/share/enigma2/picon", "/picon"])
+piconPath = config.plugins.PlutoTV.piconPath.value
+if not isdir(piconPath):
+	makedirs(piconPath)
+config.plugins.PlutoTV.addDescriptions = ConfigYesNo(default=True)
+config.plugins.PlutoTV.forcePiconDownload = ConfigYesNo(default=False)
+config.plugins.PlutoTV.separateEpisode = ConfigYesNo(default=False)
+config.plugins.PlutoTV.separateDetails = ConfigYesNo(default=False)
 
 
-def listentry(name, data, _id, epid=0, region=None):
-	res = [(name, data, _id, epid, region)]
+class PlutoLabel(Label):
+	def __init__(self):
+		self.actorsColor = 0x00BBBBBB
+		self.descriptionColor = 0x00FFFFFF
+		self.detailsColor = 0x00FFFFFF
+		self.directorsColor = 0x00BBBBBB
+		self.durationColor = 0x00999999
+		self.episodeColor = 0x00FFFF00
+		self.genreColor = 0x00999999
+		self.producersColor = 0x00BBBBBB
+		self.ratingColor = 0x00999999
+		self.releaseColor = 0x00BBBBBB
+		self.seasonColor = 0x00999999
+		self.seriesColor = 0x00999999
+		self.writersColor = 0x00BBBBBB
+		Label.__init__(self)
 
-	if data in ("menu", "favorites"):
-		picture = "/usr/lib/enigma2/python/Plugins/Extensions/PlutoTV/images/menu.png"
-	elif data in ("series", "seasons"):
-		picture = "/usr/lib/enigma2/python/Plugins/Extensions/PlutoTV/images/series.png"
-	elif data in ("movie", "episode"):
-		picture = "/usr/lib/enigma2/python/Plugins/Extensions/PlutoTV/images/cine.png"
-		if data == "episode":
-			sid = epid
-		else:
-			sid = _id
-		if sid:
-			last, length = getResumePoint(sid)
-			if last and (last > 900000) and (not length or (last < length - 900000)):
-				picture = "/usr/lib/enigma2/python/Plugins/Extensions/PlutoTV/images/cine_half.png"
-			elif last and last >= length - 900000:
-				picture = "/usr/lib/enigma2/python/Plugins/Extensions/PlutoTV/images/cine_end.png"
-	else:
-		picture = None
-
-	picload = ePicLoad()
-	picload.setPara((fhd(20), fhd(20), 1, 1, False, 1, "#FF000000"))
-
-	res.append(MultiContentEntryText(pos=(fhd(45), fhd(7)), size=(fhd(533), fhd(35)), font=0, text=name))
-	if picture is not None:
-		if os.path.isfile(picture):
-			picload.startDecode(picture, 0, 0, False)
-			png = picload.getData()
-			res.append(MultiContentEntryPixmapAlphaBlend(pos=(fhd(7), fhd(9)), size=(fhd(20), fhd(20)), png=png))
-
-	return res
+	def applySkin(self, desktop, parent):
+		if self.skinAttributes:
+			skinAttributes = []
+			for attribute, value in self.skinAttributes:
+				match attribute:
+					case "actorsColor" | "castColor":
+						self.actorsColor = gRGB(parseColor(value, default=self.actorsColor)).argb()
+					case "descriptionColor":
+						self.descriptionColor = gRGB(parseColor(value, default=self.descriptionColor)).argb()
+					case "detailsColor":
+						self.detailsColor = gRGB(parseColor(value, default=self.detailsColor)).argb()
+					case "directorsColor":
+						self.directorsColor = gRGB(parseColor(value, default=self.directorsColor)).argb()
+					case "durationColor":
+						self.durationColor = gRGB(parseColor(value, default=self.durationColor)).argb()
+					case "episodeColor":
+						self.episodeColor = gRGB(parseColor(value, default=self.episodeColor)).argb()
+					case "genreColor":
+						self.genreColor = gRGB(parseColor(value, default=self.genreColor)).argb()
+					case "producersColor":
+						self.producersColor = gRGB(parseColor(value, default=self.producersColor)).argb()
+					case "ratingColor":
+						self.ratingColor = gRGB(parseColor(value, default=self.ratingColor)).argb()
+					case "releaseColor":
+						self.releaseColor = gRGB(parseColor(value, default=self.releaseColor)).argb()
+					case "seasonColor":
+						self.seasonColor = gRGB(parseColor(value, default=self.seasonColor)).argb()
+					case "seriesColor":
+						self.seriesColor = gRGB(parseColor(value, default=self.seriesColor)).argb()
+					case "writersColor":
+						self.writersColor = gRGB(parseColor(value, default=self.writersColor)).argb()
+					case _:
+						skinAttributes.append((attribute, value))
+			self.skinAttributes = skinAttributes
+		return Label.applySkin(self, desktop, parent)
 
 
 class PlutoTV(Screen):
-	if screenWidth and screenWidth == 1920:
-		skin = """
-		<screen name="PlutoTV" zPosition="2" position="0,0" size="1920,1080" flags="wfNoBorder" title="Pluto TV" transparent="0">
-		<ePixmap pixmap="/usr/lib/enigma2/python/Plugins/Extensions/PlutoTV/images/plutotv-fhd.png" position="0,0" size="1920,1080" zPosition="-2" alphatest="blend" />
-		<widget name="logo" position="70,30" size="300,90" zPosition="0" alphatest="blend" transparent="1" />
-		<widget source="global.CurrentTime" render="Label" position="1555,30" size="300,55" font="Regular; 44" halign="right" zPosition="5" backgroundColor="black" transparent="1">
-		<convert type="ClockToText">Format:%H:%M</convert>
+	skin = """
+	<screen name="PlutoTV" title="Pluto TV" position="center,center" size="1180,570" resolution="1280,720">
+		<widget name="loading" position="0,0" size="e,e-50" font="Regular;30" horizontalAlignment="center" verticalAlignment="center" zPosition="1" />
+		<widget source="menu" render="Listbox" position="0,0" size="440,480" backgroundColorSelected="#00FF0063" itemHeight="30" transparent="1">
+			<templates>
+				<template name="Default" fonts="Regular;20" itemHeight="30" itemWidth="440">
+					<mode name="default">
+						<pixmap index="Icon" position="0,0" size="30,30" alpha="blend" padding="5" scale="centerScaled" />
+						<text index="Name" position="30,0" size="350,30" font="0" horizontalAlignment="left" padding="5,0" verticalAlignment="center" />
+						<text index="Count" position="380,0" size="60,30" autoAlign="1" font="0" horizontalAlignment="right" padding="5,0,10,0" verticalAlignment="center" />
+					</mode>
+				</template>
+			</templates>
 		</widget>
-		<widget source="global.CurrentTime" render="Label" position="1555,80" size="300,45" font="Regular; 27" halign="right" zPosition="5" backgroundColor="black" transparent="1">
-		<convert type="ClockToText">Format:%A, %d. %b.</convert>
+		<widget name="name" position="450,0" size="730,35" font="Regular;25" foregroundColor="#00FFFF00" horizontalAlignment="center" noWrap="1" verticalAlignment="center" />
+		<widget name="poster" position="450,45" size="299,435" alphatest="blend" />
+		<!-- The backgroundColor needs to be specified, as #00000000, because of an erroneous background color bleed from the last background color used in a previously drawn widget! -->
+		<widget name="details" position="760,45" size="420,435" backgroundColor="#00000000" font="Regular;20" scrollText="direction=top,mode=bounce,startDelay=2500,stepSize=1,stepDelay=60,endDelay=2500,repeat=-1" transparent="1" />
+		<!-- widget source="details" render="RunningText" position="760,45" size="420,435" backgroundColor="#00000000" font="Regular;20" options="movetype=swimming,startpoint=0,direction=top,steptime=120,repeat=10,always=0,startdelay=2000,pagedelay=1000,wrap" transparent="1" / -->
+		<widget name="footnote" position="0,e-75" size="e,25" font="Regular;20" foregroundColor="#0000FFFF" horizontalAlignment="center" noWrap="1" verticalAlignment="center" />
+		<widget source="key_red" render="Label" position="0,e-40" size="180,40" backgroundColor="key_red" conditional="key_red" font="Regular;20" foregroundColor="key_text" halign="center" valign="center">
+			<convert type="ConditionalShowHide" />
 		</widget>
-		<widget name="loading" position="560,440" size="800,200" font="Regular; 40" backgroundColor="black" transparent="0" zPosition="10" halign="center" valign="center" />
-		<widget name="playlist" position="400,48" size="1150,55" font="Regular; 40" backgroundColor="black" transparent="1" foregroundColor="#ab2a3e" zPosition="2" halign="center" />
-		<widget name="feedlist" position="70,140" size="615,743" scrollbarMode="showOnDemand" enableWrapAround="0" transparent="0" zPosition="5" foregroundColor="white" backgroundColorSelected="#00ff0063" backgroundColor="black" />
-		<widget name="poster" position="772,210" size="483,675" alphatest="blend" />
-		<widget source="description" position="1282,240" size="517,347" render="VRunningText" options="movetype=swimming,startpoint=0,direction=top,steptime=93,repeat=5,always=0,startdelay=8000,wrap" font="Regular; 29" backgroundColor="black" foregroundColor="white" transparent="0" valign="top" />
-		<widget name="vtitle" position="775,140" size="1027,48" font="Regular; 38" backgroundColor="black" foregroundColor="#ffff00" transparent="1" />
-		<widget name="vinfo" position="1282,205" size="517,48" font="Regular; 26" backgroundColor="black" foregroundColor="#9b9b9b" transparent="1" />
-		<widget name="eptitle" position="1282,597" size="517,33" font="Regular; 29" backgroundColor="black" foregroundColor="#ffff00" transparent="1" />
-		<widget source="epinfo" position="1284,637" size="517,246" render="VRunningText" options="movetype=swimming,startpoint=0,direction=top,steptime=93,repeat=5,always=0,startdelay=8000,wrap" font="Regular; 29" backgroundColor="black" foregroundColor="white" transparent="1" />
-		<widget name="help" position="70,910" size="615,48" font="Regular; 23" backgroundColor="black" foregroundColor="#9b9b9b" transparent="0" halign="center" />
-		<eLabel position="38,1050" size="420,8" backgroundColor="#ff0000" valign="center" />
-		<eLabel position="473,1050" size="420,8" backgroundColor="#32cd32" />
-		<eLabel position="908,1050" size="420,8" backgroundColor="#ffff00" />
-		<eLabel position="1343,1050" size="420,8" backgroundColor="#ff" valign="center" />
-		<widget name="red" position="38,1005" size="420,37" valign="center" halign="center" font="Regular; 30" backgroundColor="#20000000" foregroundColor="white" transparent="1" />
-		<widget name="green" position="473,968" size="420,75" valign="center" halign="center" font="Regular; 30" backgroundColor="#20000000" foregroundColor="white" transparent="1" />
-		<widget name="yellow" position="908,1005" size="420,37" valign="center" halign="center" font="Regular; 30" backgroundColor="#20000000" foregroundColor="white" transparent="1" />
-		<widget name="blue" position="1343,1005" size="420,37" valign="center" halign="center" font="Regular; 30" backgroundColor="#20000000" foregroundColor="white" transparent="1" />
-		<eLabel name="button ok" position="1800,968" size="60,27" backgroundColor="black" text="OK" font="Regular; 19" foregroundColor="white" halign="center" valign="center" shadowColor="#00000000" shadowOffset="-3,-3" zPosition="3" />
-		<eLabel name="button ok bg" position="1798,968" size="63,30" backgroundColor="#616161" zPosition="2" />
-		<eLabel name="button exit" position="1800,1013" size="60,27" backgroundColor="black" text="EXIT " font="Regular; 19" foregroundColor="white" halign="center" valign="center" shadowColor="#00000000" shadowOffset="-3,-3" zPosition="3" noWrap="1" />
-		<eLabel name="button exit bg" position="1798,1013" size="63,30" backgroundColor="#616161" zPosition="2" font="Regular; 16" foregroundColor="#20000000" />
-		</screen>"""
-	else:
-		skin = """
-		<screen name="PlutoTV" zPosition="2" position="0,0" size="1280,720" flags="wfNoBorder" title="Pluto TV" transparent="0">
-		<ePixmap pixmap="/usr/lib/enigma2/python/Plugins/Extensions/PlutoTV/images/plutotv-hd.png" position="0,0" size="1280,720" zPosition="-2" alphatest="blend" />
-		<widget name="logo" position="47,20" size="200,60" zPosition="0" alphatest="blend" transparent="1" />
-		<widget source="global.CurrentTime" render="Label" position="1037,20" size="200,36" font="Regular; 29" halign="right" zPosition="5" backgroundColor="black" transparent="1">
-		<convert type="ClockToText">Format:%H:%M</convert>
+		<widget source="key_green" render="Label" position="190,e-40" size="180,40" backgroundColor="key_green" conditional="key_green" font="Regular;20" foregroundColor="key_text" halign="center" valign="center">
+			<convert type="ConditionalShowHide" />
 		</widget>
-		<widget source="global.CurrentTime" render="Label" position="1037,50" size="200,24" font="Regular; 18" halign="right" zPosition="5" backgroundColor="black" transparent="1">
-		<convert type="ClockToText">Format:%A, %d. %b.</convert>
+		<widget source="key_yellow" render="Label" position="380,e-40" size="180,40" backgroundColor="key_yellow" conditional="key_yellow" font="Regular;20" foregroundColor="key_text" halign="center" valign="center">
+			<convert type="ConditionalShowHide" />
 		</widget>
-		<widget name="loading" position="373,293" size="533,123" font="Regular; 40" backgroundColor="black" transparent="0" zPosition="10" halign="center" valign="center" />
-		<widget name="playlist" position="267,32" size="767,37" font="Regular; 28" backgroundColor="black" transparent="1" foregroundColor="#ab2a3e" zPosition="2" halign="center" />
-		<widget name="feedlist" position="47,93" size="410,495" scrollbarMode="showOnDemand" enableWrapAround="0" transparent="1" zPosition="5" foregroundColor="white" backgroundColorSelected="#00ff0063" backgroundColor="black" />
-		<widget name="poster" position="515,137" size="322,450" alphatest="blend" />
-		<widget source="description" position="855,160" size="345,231" render="VRunningText" options="movetype=swimming,startpoint=0,direction=top,steptime=140,repeat=5,always=0,startdelay=8000,wrap" font="Regular; 19" backgroundColor="black" foregroundColor="white" transparent="0" valign="top" />
-		<widget name="vtitle" position="517,100" size="685,32" font="Regular; 25" backgroundColor="black" foregroundColor="#ffff00" transparent="1" />
-		<widget name="vinfo" position="855,137" size="345,32" font="Regular; 17" backgroundColor="black" foregroundColor="#9b9b9b" transparent="1" />
-		<widget name="eptitle" position="855,398" size="345,22" font="Regular; 19" backgroundColor="black" foregroundColor="#ffff00" transparent="1" />
-		<widget source="epinfo" position="855,426" size="345,164" render="VRunningText" options="movetype=swimming,startpoint=0,direction=top,steptime=140,repeat=5,always=0,startdelay=8000,wrap" font="Regular; 19" backgroundColor="black" foregroundColor="white" transparent="1" />
-		<widget name="help" position="47,598" size="410,32" font="Regular; 16" backgroundColor="black" foregroundColor="#9b9b9b" transparent="0" halign="center" />
-		<eLabel position="25,700" size="280,5" backgroundColor="#ff0000" valign="center" />
-		<eLabel position="315,700" size="280,5" backgroundColor="#32cd32" />
-		<eLabel position="605,700" size="280,5" backgroundColor="#ffff00" />
-		<eLabel position="895,700" size="280,5" backgroundColor="#ff" valign="center" />
-		<widget name="red" position="25,670" size="280,25" valign="center" halign="center" font="Regular; 20" backgroundColor="#20000000" foregroundColor="white" transparent="1" />
-		<widget name="green" position="315,645" size="280,50" valign="center" halign="center" font="Regular; 20" backgroundColor="#20000000" foregroundColor="white" transparent="1" />
-		<widget name="yellow" position="605,670" size="280,25" valign="center" halign="center" font="Regular; 20" backgroundColor="#20000000" foregroundColor="white" transparent="1" />
-		<widget name="blue" position="895,670" size="280,25" valign="center" halign="center" font="Regular; 20" backgroundColor="#20000000" foregroundColor="white" transparent="1" />
-		<eLabel name="button ok" position="1200,645" size="40,18" backgroundColor="black" text="OK" font="Regular; 13" foregroundColor="white" halign="center" valign="center" shadowColor="#00000000" shadowOffset="-3,-3" zPosition="3" />
-		<eLabel name="button ok bg" position="1199,645" size="42,20" backgroundColor="#616161" zPosition="2" />
-		<eLabel name="button exit" position="1200,675" size="40,18" backgroundColor="black" text="EXIT " font="Regular; 13" foregroundColor="white" halign="center" valign="center" shadowColor="#00000000" shadowOffset="-3,-3" zPosition="3" noWrap="1" />
-		<eLabel name="button exit bg" position="1199,675" size="42,20" backgroundColor="#616161" zPosition="2" />
-		</screen>"""
-	FAVO_NAME = _("** My Favorites **")
-	EMPTY_FAVO = ("0", _("No favorites available"), "", "", "", 0, "", "", "empty", "", 0, None)
-	FAVO_PATH = "/etc/enigma2/plutotv-favorites"
+		<!--
+		<widget source="key_blue" render="Label" position="570,e-40" size="180,40" backgroundColor="key_blue" conditional="key_blue" font="Regular;20" foregroundColor="key_text" halign="center" valign="center">
+			<convert type="ConditionalShowHide" />
+		</widget>
+		-->
+		<widget source="key_menu" render="Label" position="920,e-40" size="80,40" backgroundColor="key_back" conditional="key_menu" font="Regular;20" foregroundColor="key_text" halign="center" valign="center">
+			<convert type="ConditionalShowHide" />
+		</widget>
+		<widget source="key_text" render="Label" position="1010,e-40" size="80,40" backgroundColor="key_back" conditional="key_text" font="Regular;20" foregroundColor="key_text" halign="center" valign="center">
+			<convert type="ConditionalShowHide" />
+		</widget>
+		<widget source="key_help" render="Label" position="1100,e-40" size="80,40" backgroundColor="key_back" conditional="key_help" font="Regular;20" foregroundColor="key_text" halign="center" valign="center">
+			<convert type="ConditionalShowHide" />
+		</widget>
+	</screen>"""
+	FAVORITES_PATH = resolveFilename(SCOPE_CONFIG, "PlutoTV_favorites")
+	FAVORITES_NAME = _("** My Favorites **")
+
+	MENU_INDEX = 0  # This is the value from getCurrentIndex() and added when the menu item is fetched by getCurrent().
+	MENU_NAME = 1  # For skins this is index item 0!
+	MENU_COUNT = 2
+	MENU_ICON = 3
+	MENU_TYPE = 4
+	MENU_IDENTIFIER = 5
+	MENU_EPISODE = 6
+
+	HISTORY_TITLE = 0
+	HISTORY_INDEX = 1
+	HISTORY_TYPE = 2
+
+	CATEGORY_IDENTIFIER = 0
+	CATEGORY_NAME = 1
+	CATEGORY_SUMMARY = 2
+	CATEGORY_DESCRIPTION = 3
+	CATEGORY_GENRE = 4
+	CATEGORY_RATING = 5
+	CATEGORY_DURATION = 6
+	CATEGORY_POSTER = 7
+	CATEGORY_IMAGE = 8
+	CATEGORY_MEDIATYPE = 9
+	CATEGORY_URL = 10
+	CATEGORY_SEASONS = 11
+	CATEGORY_CLIP = 12
+	CATEGORY_CAPTIONS = 13
+
+	EPISODE_IDENTIFIER = 0
+	EPISODE_NAME = 1
+	EPISODE_NUMBER = 2
+	EPISODE_SEASON = 3
+	EPISODE_DESCRIPTION = 4
+	EPISODE_RATING = 5
+	EPISODE_DURATION = 6
+	EPISODE_ORIGINAL_DURATION = 7
+	EPISODE_GENRE = 8
+	EPISODE_POSTER = 9
+	EPISODE_IMAGE = 10
+	EPISODE_URL = 11
+	EPISODE_CLIP = 12
 
 	def __init__(self, session):
-		Screen.__init__(self, session)
-		self.skinName = "PlutoTV"
+		def keyRedHelp():
+			return _("Go back to the previous menu") if self.history else _("Close Pluto TV")
 
-		self["feedlist"] = SelList([])
-		self["playlist"] = Label(_("VOD Menu"))
-		self["loading"] = Label(_("Loading data... Please wait"))
-		self["description"] = StaticText()
-		self["vtitle"] = Label()
-		self["vinfo"] = Label()
-		self["eptitle"] = Label()
-		self["epinfo"] = StaticText()
-		self["red"] = Label(_("Exit"))
-		self["green"] = Label()
-		self["blue"] = Label()
-		if is_tmdb:
-			self["yellow"] = Label(_("TMDb"))
-		elif is_imdb:
-			self["yellow"] = Label(_("IMDb"))
-		else:
-			self["yellow"] = Label()
+		Screen.__init__(self, session, enableHelp=True)
+		self.baseTitle = _("Pluto TV")
+		self.setTitle(self.baseTitle)
+		self.loadingMsg = _("Loading Pluto TV categories, please wait...")
+		self["loading"] = Label(self.loadingMsg)
+		indexNames = {
+			"Name": 0,
+			"Count": 1,
+			"Icon": 2
+		}
+		self["menu"] = List(indexNames=indexNames)
+		self["menu"].onSelectionChanged.append(self.selectionChanged)
+		self["name"] = Label()
+		self["name"].hide()
 		self["poster"] = Pixmap()
-		self["logo"] = Pixmap()
-		self["help"] = Label(_("Press < or RED to go back in the menus"))
-
-		self["vtitle"].hide()
-		self["vinfo"].hide()
-		self["eptitle"].hide()
-		self["help"].hide()
-		self["yellow"].hide()
-		self.hidden = False
-
-		self["feedlist"].onSelectionChanged.append(self.update_data)
-		self.poster_to_download = []
-		self.favo_menu = False
-		self.favorites = None
-		self.favo_cache_modified = False
-		self.films = []
-		self.menu = []
-		self.history = []
-		self.chapters = {}
-		self.titlemenu = _("VOD Menu")
-
-		self.picload = ePicLoad()
-		self.picload.setPara((fhd(200), fhd(60), 1, 1, 0, 0, "#00000000"))
-		self.picload.PictureData.get().append(self.showback)
-		self.picload.startDecode("/usr/lib/enigma2/python/Plugins/Extensions/PlutoTV/images/logo.png")
-
-		if config.plugins.plutotv.silentmode.value:
+		self["poster"].hide()
+		self["details"] = PlutoLabel()
+		self["details"].hide()
+		self["footnote"] = Label()
+		self["footnote"].hide()
+		self["key_menu"] = StaticText(_("MENU"))
+		self["key_red"] = StaticText(_("Close"))
+		self["key_green"] = StaticText()
+		self["key_yellow"] = StaticText()
+		self["key_text"] = StaticText(_("TEXT"))
+		if config.plugins.PlutoTV.silentMode.value:
 			self.oldService = self.session.nav.getCurrentlyPlayingServiceReference()
 			self.session.nav.stopService()
 		else:
 			self.oldService = None
-
-		self["actions"] = ActionMap(
-			["OkCancelActions", "ColorActions", "InfobarChannelSelection", "MenuActions", "PlutoTV_Actions"],
-			{
-				"ok": self.action,
-				"cancel": self.exit,
-				"red": self.back,
-				"green": self.green,
-				"yellow": self.imdb,
-				"blue": self.favorite,
-				"leavePlayer": self.hide_screen,
-				"historyBack": self.back,
-				"menu": self.keyMenu,
-			},
-			-1,
-		)
-
-		self.updatebutton()
-		self.read_favos()
-
-		self.TimerTemp = eTimer()
-		self.TimerTemp.callback.append(self.getCategories)
-		self.TimerTemp.startLongTimer(1)
+		self.history = []
+		self["actions"] = HelpableActionMap(self, ["PlutoActions"], {
+			"close": (self.keyClose, _("Close Pluto TV")),
+			"closeRecursive": (self.keyCloseRecursive, _("Close PlutoTV and close all menus")),
+			"menu": (self.keySetup, _("Open the Pluto TV settings screen")),
+			"back": (self.keyPreviousMenu, keyRedHelp),
+			"region": (self.keySelectRegion, _("Select a VOD region"))
+		}, prio=0, description=_("Pluto TV Actions"))
+		self["menuActions"] = HelpableActionMap(self, ["PlutoActions", "NavigationActions"], {
+			"select": (self.keySelect, _("Select the current menu item")),
+			"top": (self["menu"].goTop, _("Move to first line / screen")),
+			"pageUp": (self["menu"].goPageUp, _("Move up a screen")),
+			"up": (self["menu"].goLineUp, _("Move up a line")),
+			"down": (self["menu"].goLineDown, _("Move down a line")),
+			"pageDown": (self["menu"].goPageDown, _("Move down a screen")),
+			"bottom": (self["menu"].goBottom, _("Move to last line / screen"))
+		}, prio=0, description=_("Pluto TV Actions"))
+		self["menuActions"].setEnabled(False)
+		self["previousMenuAction"] = HelpableActionMap(self, ["PlutoActions", "NavigationActions"], {
+			"first": (self.keyTopMenu, _("Return to the top menu"))
+		}, prio=0, description=_("Pluto TV Actions"))
+		self["previousMenuAction"].setEnabled(False)
+		self["movieDbAction"] = HelpableActionMap(self, ["PlutoActions"], {
+			"moviedb": self.keyMovieDatabase
+		}, prio=0, description=_("Pluto TV Actions"))
+		self["movieDbAction"].setEnabled(False)
+		self["favoriteAction"] = HelpableActionMap(self, ["PlutoActions"], {
+			"favorite": self.keyFavorite,
+		}, prio=0, description=_("Pluto TV Actions"))
+		self["favoriteAction"].setEnabled(False)
+		if not config.misc.actionLeftRightToPageUpPageDown.value:  # Add the "left" and "right" navigation options.
+			self["menuActions"].addAction(self, "NavigationActions", "right", (self.keySelect, _("Select the current menu item")))
+			self["previousMenuAction"].addAction(self, "NavigationActions", "left", (self.keyPreviousMenu, _("Go back to the previous menu")))
+		self.region = config.plugins.PlutoTV.region.value
+		self.categories = {}
+		self.categoryMenu = []
+		self.categoryTimer = eTimer()
+		self.categoryTimer.callback.append(self.getCategories)
+		self.films = []
 		self.posterTimer = eTimer()
 		self.posterTimer.callback.append(self.getTimedPoster)
-		self.onClose.append(self.save_favos)
+		self.postersToDownload = []
+		self.picLoad = ePicLoad()
+		self.episodes = {}
+		self.favorites = {}
+		self.favoritesModified = False
+		self.inFavoritesMenu = False
+		self.seasonText = ngettext("Season", "Seasons", 1)  # This is required to resolve an ambiguity is translations for "Season" and "Seasons"!
+		self.onLayoutFinish.append(self.layoutFinished)
+		self.onClose.append(self.saveFavorites)
 
-	def updatebutton(self):
-		bouquets = open("/etc/enigma2/bouquets.tv", "r").read()
-		upd_bouquets = [
-			config.plugins.plutotv.ch_region_1.value,
-			config.plugins.plutotv.ch_region_2.value,
-			config.plugins.plutotv.ch_region_3.value,
-			config.plugins.plutotv.ch_region_4.value,
-			config.plugins.plutotv.ch_region_5.value,
-		]
+	def layoutFinished(self):
+		self["menu"].enableAutoNavigation(False)  # Override list box self navigation.
+		width = self["poster"].instance.size().width()
+		height = self["poster"].instance.size().height()
+		self.picLoad.setPara((width, height, 1, 1, 0, 0, "#00000000"))
+		self.loadFavorites()
+		self.categoryTimer.start(25, True)
 
-		if os.path.isfile("/etc/Plutotv.timer") and all(
-			".pluto_tv{0}.tv".format("" if x in ("local",) else "_{0}".format(x)) in bouquets
-			for x in filter(lambda v: v != "none", set(upd_bouquets))
-		):
-			last = float(open("/etc/Plutotv.timer", "r").read().replace("\n", "").replace("\r", ""))
-			txt = _("Last:") + strftime(" %Y-%m-%d %H:%M", localtime(int(last)))
-			self["green"].setText(_("Update Pluto TV Bouquets") + "\n" + txt)
-		else:
-			m = []
-			for x in filter(lambda v: v != "none", set(upd_bouquets)):
-				b = ".pluto_tv{0}.tv".format("" if x in ("local",) else "_{0}".format(x))
-				if b not in bouquets:
-					m.append(x.upper() if x != "local" else _("LOCAL"))
-			txt = ", ".join(m) if m else _("None")
-			txt = _("{0} Pluto TV Bouquets\n'{1}' missing").format(_("Create") if m else _("Update"), txt)
-			self["green"].setText(txt)
+	def loadFavorites(self):
+		if isfile(self.FAVORITES_PATH):
+			try:
+				with open(self.FAVORITES_PATH, "rb") as fd:
+					self.favorites = load(fd)
+					for region in self.favorites.keys():
+						print(f"[PlutoTV] {len(self.favorites[region])} '{PLUTO_DATA[region][PLUTO_COUNTRY_NAME]}' favorites loaded from '{self.FAVORITES_PATH}'.")
+			except OSError as err:
+				print(f"[PlutoTV] Error {err.errno}: Unable to load favorites '{self.FAVORITES_PATH}'!  ({err.strerror})")
 
-	def read_favos(self):
-		print("[PlutoTV] Reading favorites...")
-		self.favo_cache_modified = False
-		self.favorites = []
-		try:
-			with open(self.FAVO_PATH, "rb") as picklefile:
-				_favorites = load(picklefile)
-			for _favo in iter(_favorites):
-				if len(_favo) < len(self.EMPTY_FAVO):
-					_favo += (None,)
-					self.favo_cache_modified = True
-				self.favorites.append(_favo)
-		except Exception as err:
-			print("[PlutoTV] Error reading favorites: ", err)
-
-	def save_favos(self):
-		if not self.favo_cache_modified:
-			return
-
-		print("[PlutoTV] Saving favorites...")
-		try:
-			with open(self.FAVO_PATH, "wb") as picklefile:
-				dump(self.favorites, picklefile, protocol=5)
-				self.favo_cache_modified = False
-		except Exception as err:
-			print("[PlutoTV] Error saving favorites: ", err)
-
-	def showback(self, picInfo=None):
-		try:
-			ptr = self.picload.getData()
-			if ptr is not None:
-				self["logo"].instance.setPixmap(ptr.__deref__())
-				self["logo"].instance.show()
-		except Exception as err:
-			self["logo"].instance.hide()
-			print("[PlutoTV] ERROR showImage:", err)
+	def saveFavorites(self):
+		if self.favoritesModified:
+			try:
+				with open(self.FAVORITES_PATH, "wb") as fd:
+					dump(self.favorites, fd, protocol=5)
+					self.favoritesModified = False
+					for region in self.favorites.keys():
+						print(f"[PlutoTV] {len(self.favorites[region])} '{PLUTO_DATA[region][PLUTO_COUNTRY_NAME]}' favorites saved to '{self.FAVORITES_PATH}'.")
+			except OSError as err:
+				print(f"[PlutoTV] Error {err.errno}: Unable to save favorites '{self.FAVORITES_PATH}'!  ({err.strerror})")
+		elif len(self.favorites):
+			print("[PlutoTV] No favorites changed, nothing to save.")
 
 	def getCategories(self):
-		self.lvod = {}
-		self.menu.append(self.FAVO_NAME)
-		if not self.favorites:
-			self.favorites = [self.EMPTY_FAVO]
-		self.lvod[self.FAVO_NAME] = self.favorites
-
-		region, ondemand = PlutoDownload.getOndemand()
-		self.menuitems = int(ondemand.get("totalCategories", "0"))
-		categories = ondemand.get("categories", [])
-		if len(categories) == 0:
+		self.setTitle(self.baseTitle)
+		self["key_red"].setText(_("Close"))
+		self["previousMenuAction"].setEnabled(False)
+		self.history.clear()
+		self.categories.clear()
+		self.categoryMenu.clear()
+		if self.region not in self.favorites:
+			self.favorites[self.region] = {}
+		self.categories[self.FAVORITES_NAME] = [self.favorites[self.region][x] for x in self.favorites[self.region].keys()]  # It is assumed that the favorites category item is *always* first!
+		self.categoryMenu.append((self.FAVORITES_NAME, self.FAVORITES_NAME, len(self.favorites[self.region])))  # It is assumed that the favorites menu item is *always* first!
+		header = buildHeader(PLUTO_DATA[self.region][PLUTO_IP])
+		param = {
+			"includeItems": "true",
+			"deviceType": "web",
+			"deviceId": DEVICEID1_HEX,
+			"sid": SID1_HEX,
+		}
+		carousel = fetchURL(PLUTO_VOD_URL, header=header, param=param)  # A single dictionary.
+		# carouselDump(self.region, carousel)
+		# offset = carousel.get("offset", 0)
+		# page = carousel.get("page", 0)
+		# totalCategories = carousel.get("totalCategories", 0)
+		# totalPages = carousel.get("totalPages", 0)
+		# categories = carousel.get("categories", [])  # List of category dictionaries.
+		totalCategories = int(carousel.get("totalCategories", "0"))
+		if totalCategories:
+			print(f"[PlutoTV] {totalCategories} {PLUTO_DATA[self.region][PLUTO_COUNTRY_NAME]} VOD categories found.")
+			for category in carousel.get("categories", []):  # List of category dictionaries.
+				# identifier = category.get("_id", "")
+				# name = category.get("name", "")
+				# plutoOfficeOnly = category.get("plutoOfficeOnly", False)
+				# kidsMode = category.get("plutoOfficeOnly", False)
+				# page = category.get("page", 0)
+				# offset = category.get("offset", 0)
+				# totalItemsCount = category.get("totalItemsCount", 0)
+				# mainCategories = category.get("mainCategories", [{}])  # List of dictionaries with key "categoryID" (typically only one entry defined).
+				# items = category.get("items", [{}])  # List of dictionaries of the items in this category.
+				# hero_carousel = category.get("hero_carousel", False)  # Only present when True, usually only one occurrence.
+				categoryIdentifier = category.get("_id", "")
+				categoryName = category.get("name", "")
+				self.categories[categoryIdentifier] = []
+				self.categoryMenu.append((categoryIdentifier, categoryName, int(category.get("totalItemsCount", "0"))))
+				items = category.get("items", [])
+				for item in items:
+					# identifier = item.get("_id", "")
+					# seriesID = item.get("seriesID", "")
+					# slug = item.get("slug", "")
+					# name = item.get("name", "")
+					# summary = item.get("summary", "")
+					# description = item.get("description", "")
+					# duration = item.get("duration", 0)
+					# originalContentDuration = item.get("originalContentDuration", 0)
+					# allotment = item.get("allotment", 0)
+					# rating = item.get("rating", "")
+					# featuredImage = item.get("featuredImage", {})  # Typically key "path" as a URL to a background or screen shot image.
+					# genre = item.get("genre", "")
+					# type = item.get("type", "")
+					# seasonsNumbers = item.get("seasonsNumbers", [])  # Typically a list of numeric season numbers.
+					# stitched = item.get("stitched", {})  # Typically keys "urls" and "sessionURL" with "urls" a list of dictionaries with keys "type" and "url".
+					# covers = item.get("covers", [{}])  # Typically a list of dictionaries with keys "aspectRatio" and "url".
+					# kidsMode = item.get("kidsMode", False)
+					# ratingDescriptors = item.get("ratingDescriptors", [])  # Typically a list of strings.
+					# poweredByViaFree = item.get("poweredByViaFree", False)
+					# poster16_9 = item.get("poster16_9", {})  # Typically key "path" as a URL to a background or promotional image.
+					# clip = item.get("clip", {})  # Typically keys "actors"[], "writers"[], "directors"[], producers"[] and "originalReleaseDate".
+					# entitlements = item.get("entitlements", [])  # Typically a list of strings, usually not present.
+					# avail = item.get("avail", {}) Typically a dictionary of strings, usually empty.
+					# ad = item.get("ad", False)
+					# cc = item.get("cc", False)  # Only present when True.
+					identifier = item.get("_id", "")
+					if not identifier:
+						continue
+					mediaType = item.get("type", "")
+					if mediaType == "movie":
+						urls = item.get("stitched", {}).get("urls")
+						if not isinstance(urls, list) or not urls:
+							continue
+					else:
+						urls = []
+					rating = item.get("rating", "")
+					if rating.isdigit():
+						rating = f"FSK-{rating}"
+					covers = item.get("covers", [])
+					coversLength = len(covers)
+					poster = ""
+					image = ""
+					if coversLength > 2:
+						image = covers[2].get("url", "")
+					if coversLength > 1 and len(image) == 0:
+						image = covers[1].get("url", "")
+					if coversLength > 0:
+						poster = covers[0].get("url", "")
+					self.categories[categoryIdentifier].append((
+						identifier,  # CATEGORY_IDENTIFIER.
+						item.get("name", ""),  # CATEGORY_NAME.
+						item.get("summary", ""),  # CATEGORY_SUMMARY.
+						item.get("description", ""),  # CATEGORY_DESCRIPTION.
+						item.get("genre", ""),  # CATEGORY_GENRE.
+						rating,  # CATEGORY_RATING.
+						int(item.get("duration", "0")) // 1000,  # CATEGORY_DURATION (In seconds).
+						poster,  # CATEGORY_POSTER.
+						image,  # CATEGORY_IMAGE.
+						mediaType,  # CATEGORY_MEDIATYPE.
+						urls[0].get("url", "") if urls else "",  # CATEGORY_URL.
+						item.get("seasonsNumbers", []) or [],  # CATEGORY_SEASONS.
+						item.get("clip", {}),  # CATEGORY_CLIP.
+						item.get("cc", False)  # CATEGORY_CAPTIONS.
+					))
+			self.setTitle(f"{self.baseTitle} - {"" if self.region == "AUTO" else f"{PLUTO_DATA[self.region][PLUTO_COUNTRY_NAME]} "}{_("VOD Categories Menu")}")
+			self["menu"].setList([self.buildMenuEntry(x[0], x[1], "menu", x[2]) for x in self.categoryMenu])
 			self["loading"].hide()
-			self.session.open(
-				MessageBox,
-				_("There is no data, it is possible that Pluto TV is not available in your Country"),
-				type=MessageBox.TYPE_ERROR,
-				timeout=10,
-			)
+			self["menuActions"].setEnabled(True)
 		else:
-			[self.buildlist(categorie, region) for categorie in iter(categories)]
-			_list = [listentry(key, "menu", "", region=region) for key in iter(self.menu)]
-			self["feedlist"].setList(_list)
-			self["loading"].hide()
+			print("[PlutoTV] No VOD categories found.")
+			self["loading"].setText(f"{_("Error: No VOD categories available!")}\n\n\n\n{_("Pluto TV may not be available in your location.")}")
+			self["menuActions"].setEnabled(False)
 
-	def buildlist(self, categorie, region):
-		name = categorie["name"]
-		self.lvod[name] = []
-		self.menu.append(name)
-		items = categorie.get("items", [])
-		for item in iter(items):
-			# film = (_id,name,summary,genre,rating,duration,poster,image,type,region)
-			itemid = item.get("_id", "")
-			if len(itemid) == 0:
-				continue
-			itemname = item.get("name", "")
-			itemsummary = item.get("summary", "")
-			itemgenre = item.get("genre", "")
-			itemrating = item.get("rating", "")
-			if itemrating.isdigit():
-				itemrating = "FSK-{0}".format(itemrating)
-			itemduration = int(item.get("duration") or "0") // 1000  # in seconds
-			itemimgs = item.get("covers", [])
-			itemtype = item.get("type", "")
-			seasons = len(item.get("seasonsNumbers", []))
-			itemimage = ""
-			itemposter = ""
-			if itemtype == "movie":
-				urls = item.get("stitched", {}).get("urls")
-				if not isinstance(urls, list) or len(urls) == 0:
-					continue
-				else:
-					url = urls[0].get("url", "")
-			else:
-				url = ""
+	def buildMenuEntry(self, identifier, name, menuType, count="", episode=0):
+		def showProgress(media):
+			icon = f"pluto_{media}_unwatched.png"
+			sid = episode if menuType == "episode" else identifier
+			if sid:
+				last, length = getResumePoint(sid)
+				if last and (last > 900000) and (not length or (last < length - 900000)):
+					icon = f"pluto_{media}_started.png"
+				elif last and last >= length - 900000:
+					icon = f"pluto_{media}_watched.png"
+			return icon
 
-			if len(itemimgs) > 2:
-				itemimage = itemimgs[2].get("url", "")
-			if len(itemimgs) > 1 and len(itemimage) == 0:
-				itemimage = itemimgs[1].get("url", "")
-			if len(itemimgs) > 0:
-				itemposter = itemimgs[0].get("url", "")
-			self.lvod[name].append(
-				(
-					itemid,
-					itemname,
-					itemsummary,
-					itemgenre,
-					itemrating,
-					itemduration,
-					itemposter,
-					itemimage,
-					itemtype,
-					url,
-					seasons,
-					region,
-				)
-			)
-
-	def update_data(self):
-		if len(self["feedlist"].list) == 0:
-			return
-		index, name, tipo, _id, region = self.getSelection()
-		self["yellow"].hide()
-		self["blue"].hide()
-		self.blue = False
-		if tipo == "menu":
-			self["poster"].hide()
-			self["red"].setText(_("Exit"))
-			if self.favo_menu and name == self.FAVO_NAME:
-				self.favo_menu = False
+		match menuType:
+			case "episode":
+				icon = showProgress("tv")
+			case "menu":
+				icon = "pluto_menu.png"
+			case "movie":
+				icon = showProgress("movie")
+			case "seasons":
+				icon = "pluto_seasons.png"
+			case "series":
+				icon = "pluto_series.png"
+			case _:
+				icon = None
+				print(f"[PlutoTV] Error: Unxpected menu entry type '{menuType}'!")
+		count = str(count) if isinstance(count, int) else "\u25B6" if menuType in ("episode", "movie") else ""  # Display count or PLAY icon or nothing.
+		if icon:
+			iconPath = resolveFilename(SCOPE_GUISKIN, f"images/{icon}")
+			if not isfile(iconPath):
+				iconPath = resolveFilename(SCOPE_PLUGIN_ABSOLUTE, f"images/{icon}")
+			icon = LoadPixmap(iconPath) if isfile(iconPath) else None
 		else:
-			self["red"].setText(_("Back"))
-
-		if tipo in ("movie", "series", "empty"):
-			film = self.films[index]
-			if tipo != "empty":
-				self["vtitle"].setText(film[1])
-				if not self.favo_menu:
-					self["blue"].setText(_("Favorite"))
-				else:
-					self["blue"].setText(_("Delete favorite"))
-				self["blue"].show()
-				self.blue = True
-			else:
-				self["poster"].hide()
-				self["vtitle"].setText("")
-			self["description"].setText(film[2])
-			info = film[4] + "       "
-			if tipo == "movie":
-				info = info + strftime("%Hh %Mm", gmtime(int(film[5])))
-				if is_tmdb or is_imdb:
-					self["yellow"].show()
-			elif tipo == "series":
-				info = info + str(film[10]) + " " + _("Seasons available")
-				if is_tmdb or is_imdb:
-					self["yellow"].show()
-			self["vinfo"].setText(info)
-			picname = film[0] + ".jpg"
-			pic = film[6]
-			pic = urlparse(pic)
-			pic = urljoin("https://images.pluto.tv", pic.path.replace("/v3/images", ""))
-			if len(picname) > 5:
-				filename = os.path.join(FOLDER, picname)
-				self.getPoster(filename, pic)
-		elif tipo == "seasons":
-			self["eptitle"].hide()
-			self["epinfo"].setText("")
-		elif tipo == "episode":
-			film = self.chapters[int(_id)][index]
-			self["epinfo"].setText(film[3])
-			self["eptitle"].setText(film[1] + "  " + strftime("%Hh %Mm", gmtime(int(film[5]))))
-			self["eptitle"].show()
-
-	def getPoster(self, *args):
-		self.poster_to_download.append(args)
-		self.posterTimer.start(250, True)
+			iconPath = None
+		# print(f"[PlutoTV] buildMenuEntry DEBUG: name='{name}', count='{count.replace("\u25B6", ">")}', icon={iconPath}, menuType='{menuType}', identifier='{identifier}', episode='{episode}'.")
+		return (name, count, icon, menuType, identifier, episode)
 
 	def getTimedPoster(self):
-		args = self.poster_to_download[-1]
-		self.poster_to_download *= 0
-		self._getPoster(*args)
+		def getPoster(path, url):
+			def getPosterDone(path):
+				def showPoster(picInfo=None):
+					try:
+						image = self.picLoad.getData()
+						if image:
+							self["poster"].instance.setPixmap(image.__deref__())
+							self["poster"].instance.show()
+					except Exception as err:
+						print(f"[PlutoTV] showPoster Error: '{err}'!")
 
-	def _getPoster(self, filename, url):
-		down = DownloadPosters()
-		if url.endswith(".jpg"):
-			url += "?h=640&w=480"
-		down.start(filename, url).addCallback(self.actualizaimg, "poster").addErrback(self.posterErr, filename, url)
+				try:
+					pictureData = self.picLoad.PictureData.get()
+					del pictureData[:]
+					pictureData.append(showPoster)
+					self.picLoad.startDecode(path)
+				except Exception as err:
+					print(f"[PlutoTV] getPosterDone Error: '{err}'!")
 
-	def posterErr(self, failure, filename=None, url=""):
-		print("[PlutoTV] posterErr", failure, filename, url)
-		if url.endswith("/poster.jpg?h=640&w=480"):
-			url = url.replace("/poster.jpg?h=640&w=480", "/tile.jpg?h=480&w=480")
-			return self._getPoster(filename, url)
+			def getPosterError(error, path=None, url=""):
+				print(f"[PlutoTV] Error: Unable to get poster image!  (Error='{error}', Path='{path}', URL='{url}')")
+				if url.endswith("/poster.jpg?h=640&w=480"):
+					url = url.replace("/poster.jpg?h=640&w=480", "/tile.jpg?h=480&w=480")
+					return getPoster(path, url)
+				else:
+					self["poster"].hide()
+
+			if isfile(path):
+				# print(f"[PlutoTV] getPoster DEBUG: Using cached poster '{path}' from '{url}'.")
+				getPosterDone(path)  # Use poster already cached.
+			else:
+				# print(f"[PlutoTV] getPoster DEBUG: Fetch poster '{path}' from '{url}'.")
+				PlutoDownloader().start(path, url).addCallback(getPosterDone).addErrback(getPosterError, path, url)  # Fetch poster.
+
+		path, url = self.postersToDownload[-1]
+		self.postersToDownload.clear()
+		path = path.rstrip()
+		if path:
+			if url.endswith(".jpg"):
+				url = f"{url}?h=640&w=480"
+			getPoster(path, url)
+
+	def selectionChanged(self):
+		def getPoster(path, url):
+			self.postersToDownload.append((path, url))
+			self.posterTimer.start(250, True)
+
+		def processDetails(description, genre, rating, duration, original, clip):
+			if description:
+				details.append(rf"\c{detailsLabel.detailsColor:08X}{description}\c{detailsLabel.detailsColor:08X}")
+			section = []
+			if genre:
+				section.append(rf"\c{detailsLabel.genreColor:08X}{_("Genre")}: {genre}\c{detailsLabel.detailsColor:08X}")
+			if rating:
+				section.append(rf"\c{detailsLabel.ratingColor:08X}{_("Rating")}: {rating}\c{detailsLabel.detailsColor:08X}")
+			if duration:
+				original = f"  ({_("Original")}: {strftime("%H:%M", gmtime(original))})" if original else ""
+				section.append(rf"\c{detailsLabel.durationColor:08X}{_("Duration")}: {strftime("%H:%M", gmtime(duration))}{original}\c{detailsLabel.detailsColor:08X}")
+			if section:
+				if details:
+					details.append("")
+				details.append("\n".join(section))
+			if clip:
+				section = []
+				if "actors" in clip:
+					# data = ", ".join(clip["actors"])
+					# details.append(f"{ngettext("Actor", "Actors", len(data))}: {", ".join(data)}.")
+					section.append(rf"\c{detailsLabel.actorsColor:08X}{_("Cast")}: {", ".join(clip["actors"])}.\c{detailsLabel.detailsColor:08X}")
+				if "writers" in clip:
+					data = clip["writers"]
+					section.append(rf"\c{detailsLabel.writersColor:08X}{ngettext("Writer", "Writers", len(data))}: {", ".join(data)}.\c{detailsLabel.detailsColor:08X}")
+				if "directors" in clip:
+					data = clip["directors"]
+					section.append(rf"\c{detailsLabel.directorsColor:08X}{ngettext("Director", "Directors", len(data))}: {", ".join(data)}.\c{detailsLabel.detailsColor:08X}")
+				if "producers" in clip:
+					data = clip["producers"]
+					section.append(rf"\c{detailsLabel.producersColor:08X}{ngettext("Producer", "Producers", len(data))}: {", ".join(data)}.\c{detailsLabel.detailsColor:08X}")
+				if "originalReleaseDate" in clip:
+					data = strftime(config.usage.date.daylong.value, localtime(mktime(strptime(clip["originalReleaseDate"], "%Y-%m-%dT%H:%M:%SZ"))))
+					section.append(rf"\c{detailsLabel.releaseColor:08X}{_("Original release")}: {data}.\c{detailsLabel.detailsColor:08X}")
+				if section:
+					if details:
+						details.append("")
+					details.append(("\n\n" if config.plugins.PlutoTV.separateDetails.value else "\n").join(section))
+
+		def updateMovieDbButton(flag):
+			text = (_("IMDb") if imdbAvailable else _("TMDb") if tmdbAvailable else "") if flag else ""
+			self["key_green"].setText(text)
+			self["movieDbAction"].setEnabled(text != "")
+
+		detailsLabel = self["details"]
+		menuData = self.getMenuSelection()
+		index = menuData[self.MENU_INDEX]
+		match menuData[self.MENU_TYPE]:
+			case "empty" | "menu":
+				self["name"].hide()
+				self["poster"].hide()
+				self["details"].hide()
+				updateMovieDbButton(False)
+				self.updateFavoriteButton(None)
+			case "episode":
+				episode = self.episodes[menuData[self.MENU_IDENTIFIER]][index]
+				details = []
+				number = episode[self.EPISODE_NUMBER]
+				season = episode[self.EPISODE_SEASON]
+				if number and season:
+					details.append(rf"\c{detailsLabel.episodeColor:08X}{self.seasonText} {season} - {_("Episode")} {number}\c{detailsLabel.detailsColor:08X}")
+					if config.plugins.PlutoTV.separateEpisode.value:
+						details.append("")
+				data = episode[self.EPISODE_NAME]
+				if data:
+					details.append(rf"\c{detailsLabel.episodeColor:08X}{data}\c{detailsLabel.detailsColor:08X}")
+					if config.plugins.PlutoTV.separateEpisode.value:
+						details.append("")
+				processDetails(episode[self.EPISODE_DESCRIPTION], episode[self.EPISODE_GENRE], episode[self.EPISODE_RATING], episode[self.EPISODE_DURATION], episode[self.EPISODE_ORIGINAL_DURATION], episode[self.EPISODE_CLIP])
+				self["details"].setText("\n".join(details))
+				self["details"].show()
+				updateMovieDbButton(False)
+				self.updateFavoriteButton(None)
+			case "movie":
+				film = self.films[index]
+				self["name"].setText(film[self.CATEGORY_NAME])
+				self["name"].show()
+				data = f"{film[self.CATEGORY_IDENTIFIER]}.jpg"
+				if len(data) > 5:
+					posterURL = film[self.CATEGORY_POSTER]
+					posterURL = urlparse(posterURL)
+					posterURL = urljoin(PLUTO_IMAGE_URL, posterURL.path.replace("/v3/images", ""))
+					getPoster(join(PLUTO_FOLDER, data), posterURL)
+				self["poster"].hide()  # Disable this to keep the previous image visible until the new image is loaded!
+				details = []
+				processDetails(film[self.CATEGORY_SUMMARY], film[self.CATEGORY_GENRE], film[self.CATEGORY_RATING], film[self.CATEGORY_DURATION], None, film[self.CATEGORY_CLIP])
+				detailsLabel.setText("\n".join(details))
+				detailsLabel.show()
+				updateMovieDbButton(True)
+				self.updateFavoriteButton(film[self.CATEGORY_IDENTIFIER] in self.favorites[self.region])
+			case "seasons":
+				seasons = list(self.episodes.keys())
+				details = self.details[:]
+				details.append(rf"\c{detailsLabel.seasonColor:08X}{self.seasonText} {seasons[index]} contains {len(self.episodes[seasons[index]])} episodes\c{detailsLabel.detailsColor:08X}")
+				detailsLabel.setText("\n".join(details))
+				detailsLabel.show()
+				updateMovieDbButton(False)
+				self.updateFavoriteButton(None)
+			case "series":
+				film = self.films[index]
+				self["name"].setText(film[self.CATEGORY_NAME])
+				self["name"].show()
+				data = f"{film[self.CATEGORY_IDENTIFIER]}.jpg"
+				if len(data) > 5:
+					posterURL = film[self.CATEGORY_POSTER]
+					posterURL = urlparse(posterURL)
+					posterURL = urljoin(PLUTO_IMAGE_URL, posterURL.path.replace("/v3/images", ""))
+					getPoster(join(PLUTO_FOLDER, data), posterURL)
+				self["poster"].hide()  # Disable this to keep the previous image visible until the new image is loaded!
+				details = []
+				processDetails(film[self.CATEGORY_SUMMARY], film[self.CATEGORY_GENRE], film[self.CATEGORY_RATING], film[self.CATEGORY_DURATION], None, film[self.CATEGORY_CLIP])
+				data = len(film[self.CATEGORY_SEASONS])
+				details.append("")
+				self.details = details
+				details.append(rf"\c{detailsLabel.seriesColor:08X}{data} {ngettext("Season available", "Seasons available", data)}\c{detailsLabel.detailsColor:08X}")
+				detailsLabel.setText("\n".join(details))
+				detailsLabel.show()
+				updateMovieDbButton(True)
+				self.updateFavoriteButton(film[self.CATEGORY_IDENTIFIER] in self.favorites[self.region])
+		self["footnote"].hide()
+
+	def updateFavoriteButton(self, isFavorite):
+		text = "" if isFavorite is None else (_("Delete Favorite") if isFavorite else _("Add Favorite"))
+		self["key_yellow"].setText(text)
+		self["favoriteAction"].setEnabled(text != "")
+
+	def keyClose(self):
+		def keyCloseCallback(answer):
+			if answer:
+				self.posterTimer.stop()
+				if self.oldService:
+					self.session.nav.playService(self.oldService)
+				self.close()
+
+		if config.plugins.PlutoTV.confirmClose.value:
+			self.session.openWithCallback(keyCloseCallback, MessageBox, _("Do you want to close Pluto TV?"), type=MessageBox.TYPE_YESNO, windowTitle=self.baseTitle)
 		else:
-			self["poster"].hide()
+			keyCloseCallback(True)
 
-	def actualizaimg(self, filename, tipo=None):
-		if tipo == "poster" and filename:
-			self.decodePoster(filename)
+	def keyCloseRecursive(self):
+		self.posterTimer.stop()
+		if self.oldService:
+			self.session.nav.playService(self.oldService)
+		self.close((True,))
 
-	def buildchapters(self, chapters):
-		self.chapters.clear()
-		items = chapters.get("seasons", [])
-		for item in iter(items):
-			chs = item.get("episodes", [])
-			for ch in iter(chs):
-				season = ch.get("season", 0)
-				if season != "":
-					if season not in self.chapters:
-						self.chapters[season] = []
-					_id = ch.get("_id", "")
-					name = ch.get("name", "")
-					number = str(ch.get("number", "0"))
-					summary = ch.get("description", "")
-					rating = ch.get("rating", "")
-					duration = int(ch.get("duration", "0") or "0") // 1000
-					genre = ch.get("genre", "")
-					imgs = ch.get("covers", [])
-					urls = ch.get("stitched", {}).get("urls", [])
-					if len(urls) > 0:
-						url = urls[0].get("url", "")
-					else:
-						continue
+	def keySetup(self):
+		def keySetupCallback(result=None):
+			if config.plugins.PlutoTV.region.value != self.region:
+				self.region = config.plugins.PlutoTV.region.value
+				self.setTitle(self.baseTitle)
+				self["loading"].setText(self.loadingMsg)
+				self["loading"].show()
+				self.categoryTimer.start(25, True)
 
-					itemimage = ""
-					itemposter = ""
-					if len(imgs) > 2:
-						itemimage = imgs[2].get("url", "")
-					if len(imgs) > 1 and len(itemimage) == 0:
-						itemimage = imgs[1].get("url", "")
-					if len(imgs) > 0:
-						itemposter = imgs[0].get("url", "")
-					self.chapters[season].append(
-						(_id, name, number, summary, rating, duration, genre, itemposter, itemimage, url)
-					)
+		self.session.openWithCallback(keySetupCallback, PlutoSetup)
 
-	def getSelection(self):
-		try:
-			index = self["feedlist"].getSelectionIndex()
-			data = self["feedlist"].getCurrent()[0]
-
-			return index, data[0], data[1], data[2], data[3]
-		except TypeError:
-			return index, "", None, None, None
-
-	def action(self):
-		index, name, tipo, _id, region = self.getSelection()
-		menu = []
-		menuact = self.titlemenu
-		if tipo == "menu":
-			if name == self.FAVO_NAME:
-				self.favo_menu = True
-			self.films = self.lvod[self.menu[index]]
-			for x in iter(self.films):
-				sname = x[1]
-				stipo = x[8]
-				sid = x[0]
-				region = x[11]
-				menu.append(listentry(sname, stipo, sid, region=region))
-			self["feedlist"].moveToIndex(0)
-			self["feedlist"].setList(menu)
-			self.titlemenu = name
-			self["playlist"].setText(self.titlemenu)
-			self.history.append((index, menuact))
-			self["vtitle"].show()
-			self["vinfo"].show()
-			self["help"].show()
-		elif tipo == "series":
-			region = self.films[index][11]
-			chapters = PlutoDownload.getVOD(_id, region)
-			self.buildchapters(chapters)
-			stipo = "seasons"
-			for key in self.chapters:
-				sname = str(key)
-				sid = str(key)
-				menu.append(listentry(_("Season") + " " + sname, stipo, sid, region=region))
-
-			if not menu:
-				menu.append(listentry(_("No season available"), stipo, None, region=region))
-			self["feedlist"].setList(menu)
-			self.titlemenu = name + " - " + _("Seasons")
-			self["playlist"].setText(self.titlemenu)
-			self.history.append((index, menuact))
-			self["feedlist"].moveToIndex(0)
-		elif tipo == "seasons":
-			stipo = "episode"
-			try:
-				for key in iter(self.chapters[int(_id)]):
-					sname = key[1]
-					sid = key[0]
-					menu.append(listentry(_("Episode") + " " + key[2] + ". " + sname, stipo, _id, sid, region=region))
-			except Exception as err:
-				print("[PlutoTV] ERROR action:", err)
-				return
-
-			if not menu:
-				menu.append(listentry(_("No episode available"), stipo, None, region=region))
-			self["feedlist"].setList(menu)
-			self.titlemenu = menuact.split(" - ")[0] + " - " + name
-			self["playlist"].setText(self.titlemenu)
-			self.history.append((index, menuact))
-			self["feedlist"].moveToIndex(0)
-		elif tipo == "movie":
-			film = self.films[index]
-			sid = film[0]
-			name = film[1]
-			url = film[9]
-			self.playVOD(name, sid, url)
-		elif tipo == "episode":
-			film = self.chapters[int(_id)][index]
-			sid = film[0]
-			name = film[1]
-			url = film[9]
-			self.playVOD(name, sid, url)
-
-	def back(self):
-		index, name, tipo, _id, region = self.getSelection()
-		if tipo == "menu":
-			return self.exit()
-		menu = []
-		if len(self.history) > 0:
-			hist = self.history[-1][0]
-			histname = self.history[-1][1]
-			if tipo in ("movie", "series", "empty"):
-				for key in iter(self.menu):
-					menu.append(listentry(key, "menu", "", region=region))
-				self["help"].hide()
-				self["description"].setText("")
-				self["vtitle"].hide()
-				self["vinfo"].hide()
-			if tipo == "seasons":
-				for x in iter(self.films):
-					sname = x[1]
-					stipo = x[8]
-					sid = x[0]
-					menu.append(listentry(sname, stipo, sid, region=region))
-			if tipo == "episode":
-				for key in self.chapters:
-					sname = str(key)
-					stipo = "seasons"
-					sid = str(key)
-					menu.append(listentry(_("Season") + " " + sname, stipo, sid, region=region))
-			self["feedlist"].setList(menu)
-			self.history.pop()
-			self["feedlist"].moveToIndex(hist)
-			self.titlemenu = histname
-			self["playlist"].setText(self.titlemenu)
-
-	def keyMenu(self):
-		self.openPlutoSettings()
-
-	def playVOD(self, name, sid, url):
-		_sid, device_id = PlutoDownload.getUUID()
-		url = update_qsd(
-			url,
-			{
-				"deviceId": device_id,
-				"sid": device_id,
+	def keySelect(self):
+		def playVOD(url, name, identifier):
+			url = updateQuery(url, {
+				"deviceId": DEVICEID1_HEX,
+				"sid": DEVICEID1_HEX,
 				"deviceType": "web",
 				"deviceMake": "Firefox",
 				"deviceModel": "Firefox",
-				"appName": "web",
-			},
-		)
-		ref = "4097:0:0:0:0:0:0:0:0:0:{0}:{1}".format(url.replace(":", "%3A"), name.replace(":", "%3A"))
-		reference = eServiceReference(ref)
-		if "m3u8" in url.lower():
-			self.session.openWithCallback(self.returnplayer, Pluto_Player, service=reference, sid=sid)
+				"appName": "web"
+			})
+			serviceReference = eServiceReference(f"4097:0:0:0:0:0:0:0:0:0:{url.replace(":", "%3A")}:{name.replace(":", "%3A")}")
+			if "m3u8" in url.lower():
+				self.session.open(PlutoPlayer, serviceReference, identifier)
 
-	def returnplayer(self):
-		menu = []
-		for _l in iter(self["feedlist"].list):
-			menu.append(listentry(_l[0][0], _l[0][1], _l[0][2], _l[0][3], _l[0][4]))
-		self["feedlist"].setList(menu)
+		menuData = self.getMenuSelection()
+		index = menuData[self.MENU_INDEX]
+		name = menuData[self.MENU_NAME]
+		menuType = menuData[self.MENU_TYPE]
+		identifier = menuData[self.MENU_IDENTIFIER]
+		if menuType not in ("empty", "episode", "movie"):  # These do not lead to a sub-menu.
+			self.history.append((self.getTitle(), index, menuType))
+		self["key_red"].setText(_("Back"))
+		self["previousMenuAction"].setEnabled(True)
+		match menuType:
+			case "empty":
+				pass
+			case "episode":
+				episode = self.episodes[identifier][index]
+				playVOD(episode[self.EPISODE_URL], episode[self.EPISODE_NAME], episode[self.EPISODE_IDENTIFIER])
+			case "menu":
+				self.films = self.categories[self.categoryMenu[index][0]]
+				if len(self.films):
+					self["menu"].setList([self.buildMenuEntry(x[self.CATEGORY_IDENTIFIER], x[self.CATEGORY_NAME], x[self.CATEGORY_MEDIATYPE], len(x[self.CATEGORY_SEASONS]) or "") for x in self.films])
+				else:
+					self["menu"].setList([self.buildMenuEntry(0, _("** No favorites available **"), "empty")])
+				self["menu"].setCurrentIndex(0)
+				self.setTitle(f"{self.baseTitle} - {name}")
+				self.inFavoritesMenu = name == self.FAVORITES_NAME
+			case "movie":
+				film = self.films[index]
+				playVOD(film[self.CATEGORY_URL], film[self.CATEGORY_NAME], film[self.CATEGORY_IDENTIFIER])
+			case "seasons":
+				if identifier in self.episodes.keys():
+					menu = [self.buildMenuEntry(identifier, f"{x[self.EPISODE_NUMBER]}: {x[self.EPISODE_NAME]}", "episode", "", x[self.EPISODE_IDENTIFIER]) for x in self.episodes[identifier]]
+				else:
+					menu = [self.buildMenuEntry(0, _("** No episodes available **"), "empty")]
+				self["menu"].setList(menu)
+				self["menu"].setCurrentIndex(0)
+				self.setTitle(f"{self.baseTitle} - {self.getTitle().split(" - ")[1]} - {name}")
+			case "series":
+				header = buildHeader(PLUTO_DATA[self.region][PLUTO_IP])
+				param = {
+					"includeItems": "true",
+					"deviceType": "web",
+					"deviceId": DEVICEID1_HEX,
+					"sid": SID1_HEX,
+				}
+				series = fetchURL(PLUTO_SEASON_URL % identifier, header=header, param=param)
+				# seriesDump(self.region, series)
+				# identifier = series.get("_id", "")
+				# name = series.get("name", "")
+				# summary = series.get("summary", "")
+				# description = series.get("description", "")
+				# slug = series.get("slug", "")
+				# type = series.get("type", "")
+				# rating = series.get("rating", "")
+				# featuredImage = series.get("featuredImage", {})  # Typically key "path" as a URL to a background or screen shot image.
+				# genre = series.get("genre", "")
+				# offset = series.get("offset", 0)
+				# page = series.get("page", 0)
+				# seasons = series.get("seasons", [])  # List of dictionaries of the items in this season.
+				# covers = series.get("covers", [])  # Typically a list of dictionaries with keys "aspectRatio" and "url".
+				# poster16_9 = series.get("poster16_9", {})  # Typically key "path" as a URL to a background or promotional image.
+				# avail = series.get("avail", {})  # Typically an empty dictionary.
+				self.episodes.clear()
+				for season in series.get("seasons", []):
+					# episodes = season.get("episodes", [])  # List of dictionaries of the episodes in this season.
+					# number = season.get("number", 0)
+					for episode in (season.get("episodes", [])):
+						# identifier = episode.get("_id", "")
+						# name = episode.get("name", "")
+						# description = episode.get("description", "")
+						# allotment = episode.get("allotment", 0)
+						# rating = episode.get("rating", "")
+						# slug = episode.get("slug", "")
+						# duration = episode.get("duration", 0)
+						# originalContentDuration = episode.get("originalContentDuration", 0)
+						# genre = episode.get("genre", "")
+						# type = episode.get("type", "")
+						# number = episode.get("number", 0)
+						# season = episode.get("season", 0)
+						# stitched = episode.get("stitched", {})  # Typically keys "urls" and "sessionURL" with "urls" a list of dictionaries with keys "type" and "url".
+						# covers = episode.get("covers", [])  # Typically a list of dictionaries with keys "aspectRatio" and "url".
+						# poster16_9 = episode.get("poster16_9", {})  # Typically key "path" as a URL to a background or promotional image.
+						# clip = episode.get("clip", {})  # Typically keys "actors"[], "writers"[], "directors"[], producers"[] and "originalReleaseDate".
+						# cc = episode.get("cc", False)
+						season = int(episode.get("season", "0") or "0")
+						if season:
+							if season not in self.episodes:
+								self.episodes[season] = []
+							urls = episode.get("stitched", {}).get("urls", [])
+							if len(urls) > 0:
+								url = urls[0].get("url", "")
+							else:
+								continue
+							covers = episode.get("covers", [])
+							coversLength = len(covers)
+							poster = ""
+							image = ""
+							if coversLength > 2:
+								image = covers[2].get("url", "")
+							if coversLength > 1 and len(image) == 0:
+								image = covers[1].get("url", "")
+							if coversLength > 0:
+								poster = covers[0].get("url", "")
+							self.episodes[season].append((
+								episode.get("_id", ""),  # EPISODE_IDENTIFIER.
+								episode.get("name", ""),  # EPISODE_NAME.
+								episode.get("number", "0"),  # EPISODE_NUMBER.
+								episode.get("season", "0"),  # EPISODE_SEASON.
+								episode.get("description", ""),  # EPISODE_DESCRIPTION.
+								episode.get("rating", ""),  # EPISODE_RATING.
+								int(episode.get("duration", "0") or "0") // 1000,  # EPISODE_DURATION.
+								int(episode.get("originalContentDuration", "0") or "0") // 1000,  # EPISODE_ORIGINAL_DURATION.
+								episode.get("genre", ""),  # EPISODE_GENRE.
+								poster,  # EPISODE_POSTER.
+								image,  # EPISODE_IMAGE.
+								url,  # EPISODE_URL.
+								episode.get("clip", {})  # EPISODE_CLIP.
+							))
+				if self.episodes:
+					menu = [self.buildMenuEntry(x, f"{self.seasonText} {x}", "seasons", len(self.episodes[x]) or "") for x in self.episodes.keys()]
+					count = len(menu)
+				else:
+					menu = [self.buildMenuEntry(0, _("** No seasons available **"), "empty")]
+					count = 0
+				self["menu"].setList(menu)
+				self["menu"].setCurrentIndex(0)
+				self.setTitle(f"{self.baseTitle} - {series.get("name", "")} - {ngettext("Season", "Seasons", count)}")
 
-	def decodePoster(self, image):
-		try:
-			x = self["poster"].instance.size().width()
-			y = self["poster"].instance.size().height()
-			picture = image.replace("\n", "").replace("\r", "")
-			self.picload.setPara((x, y, 1, 1, 0, 0, "#00000000"))
-			_l = self.picload.PictureData.get()
-			del _l[:]
-			_l.append(self.showImage)
-			self.picload.startDecode(picture)
-		except Exception as err:
-			print("[PlutoTV] ERROR decodeImage:", err)
+	def keyMovieDatabase(self):
+		menuData = self.getMenuSelection()
+		name = menuData[self.MENU_NAME]
+		if imdbAvailable:
+			try:
+				imdb(self.session, name)
+			except Exception as err:
+				print(f"[PlutoTV] Error: Unable to retrieve IMDb data for '{name}'!  ({err})")
+		elif tmdbAvailable:
+			try:
+				self.session.open(tmdb.tmdbScreen, name, 0)
+			except Exception as err:
+				print(f"[PlutoTV] Error: Unable to retrieve TMDb data for '{name}'!  ({err})")
 
-	def showImage(self, picInfo=None):
-		try:
-			ptr = self.picload.getData()
-			if ptr is not None:
-				self["poster"].instance.setPixmap(ptr.__deref__())
-				self["poster"].instance.show()
-		except Exception as err:
-			print("[PlutoTV] ERROR showImage:", err)
-
-	def green(self):
-		self.session.openWithCallback(self.endupdateLive, PlutoDownload.PlutoDownload)
-
-	def blue(self):
-		pass
-
-	def hide_screen(self):
-		if self.hidden:
-			self.show()
+	def keyFavorite(self):
+		menuData = self.getMenuSelection()
+		identifier = menuData[self.MENU_IDENTIFIER]
+		name = menuData[self.MENU_NAME]
+		index = menuData[self.MENU_INDEX]
+		if identifier in self.favorites[self.region]:
+			del self.favorites[self.region][identifier]
+			print(f"[PlutoTV] {PLUTO_DATA[self.region][PLUTO_COUNTRY_NAME]} favorite '{name}' deleted.")
+			self.updateFavoriteButton(False)
+			text = _("%s favorite deleted.") % PLUTO_DATA[self.region][PLUTO_COUNTRY_NAME]
 		else:
-			self.hide()
-		self.hidden = not self.hidden
-
-	def endupdateLive(self, ret=None):
-		self.updatebutton()
-		if ret:
-			self.session.open(
-				MessageBox,
-				_(
-					"You now have an updated favorites list with Pluto TV channels on your channel list.\n\n"
-					"Everything will be updated automatically every 5 hours."
-				),
-				type=MessageBox.TYPE_INFO,
-				timeout=10,
-			)
-
-	def exit(self):
-		self.session.openWithCallback(
-			self.confirmexit, MessageBox, _("Do you really want to leave PlutoTV?"), type=MessageBox.TYPE_YESNO
-		)
-
-	def confirmexit(self, ret=True):
-		if ret:
-			self.posterTimer.stop()
-			self.TimerTemp.stop()
-			if self.oldService:
-				self.session.nav.playService(self.oldService)
-			self.close()
-
-	def imdb(self):
-		index, name, tipo, _id, region = self.getSelection()
-		if tipo in ("movie", "series"):
-			if is_tmdb:
-				try:
-					self.session.open(tmdb.tmdbScreen, name, 0)
-				except Exception as err:
-					print("[PlutoTV] tmdb: ", err)
-			elif is_imdb:
-				try:
-					imdb(self.session, name)
-				except Exception as err:
-					print("[PlutoTV] imdb: ", err)
-
-	def favorite(self):
-		if not self.blue:
-			return
-
-		index, name, tipo, _id, region = self.getSelection()
-		if tipo in ("movie", "series"):
-			if not self.favo_menu:
-				for item in iter(self.favorites):
-					if item[1] == name:
-						print("[PlutoTV]", _("Favorite already exists"), name)
-						return self.session.open(MessageBox, _("Favorite already exists"), MessageBox.TYPE_INFO, timeout=2)
-				data = self.films[index]
-				if len(self.favorites) == 1 and self.favorites[0][8] == "empty":
-					self.favorites[0] = data
-				else:
-					self.favorites.append(data)
-				self.favo_cache_modified = True
-				print("[PlutoTV]", _("Favorite added"), name)
-				return self.session.open(MessageBox, _("Favorite added"), MessageBox.TYPE_INFO, timeout=2)
+			film = self.films[index]
+			if self.region not in self.favorites:
+				self.favorites[self.region] = {}
+			self.favorites[self.region][film[self.CATEGORY_IDENTIFIER]] = film
+			print(f"[PlutoTV] {PLUTO_DATA[self.region][PLUTO_COUNTRY_NAME]} favorite '{name}' added.")
+			self.updateFavoriteButton(True)
+			text = _("%s favorite added.") % PLUTO_DATA[self.region][PLUTO_COUNTRY_NAME]
+		self.favoritesModified = True
+		self.categoryMenu[0] = (self.FAVORITES_NAME, self.FAVORITES_NAME, len(self.favorites[self.region]))  # This assumes that the favorites menu item is *always* first!
+		favorites = [self.favorites[self.region][x] for x in self.favorites[self.region].keys()]
+		self.categories[self.FAVORITES_NAME] = favorites
+		if self.inFavoritesMenu:
+			if favorites:
+				self["menu"].setList([self.buildMenuEntry(x[self.CATEGORY_IDENTIFIER], x[self.CATEGORY_NAME], x[self.CATEGORY_MEDIATYPE], len(x[self.CATEGORY_SEASONS]) or "") for x in favorites])
 			else:
-				if self.favorites:
-					self.favorites.pop(index)
-					self.favo_cache_modified = True
-				self["feedlist"].list.pop(index)
-				if not self.favorites:
-					self.favorites.append(self.EMPTY_FAVO)
-					_list = [listentry(self.EMPTY_FAVO[1], "empty", "0")]
-					self["poster"].hide()
-					self["feedlist"].setList(_list)
-				else:
-					self["feedlist"].setList(self["feedlist"].list)
-				print("[PlutoTV] Favorite deleted:", name)
+				self["menu"].setList([self.buildMenuEntry(0, _("** No favorites available **"), "empty")])
+				self.selectionChanged()
+		self["footnote"].setText(text)
+		self["footnote"].show()
 
-	def restartEnigma2(self, e2_restart=False, pluto_restart=False):
-		if pluto_restart:
-			if self.oldService:
-				self.session.nav.playService(self.oldService)
-			self.close(True)
-		elif e2_restart:
-			from Screens.Standby import TryQuitMainloop
+	def keyPreviousMenu(self, top=False):
+		if not self.history:
+			self.keyClose()
+		else:
+			if top:
+				history = self.history[0]
+				self.history.clear()
+			else:
+				history = self.history.pop()
+			match history[self.HISTORY_TYPE]:
+				case "menu":
+					self["name"].hide()
+					self["details"].hide()
+					menu = [self.buildMenuEntry(x[0], x[1], "menu", x[2]) for x in self.categoryMenu]
+				case "seasons":
+					menu = [self.buildMenuEntry(x, f"{self.seasonText} {x}", "seasons", len(self.episodes[x]) or "") for x in self.episodes.keys()]
+				case "series":
+					menu = [self.buildMenuEntry(x[self.CATEGORY_IDENTIFIER], x[self.CATEGORY_NAME], x[self.CATEGORY_MEDIATYPE], len(x[self.CATEGORY_SEASONS]) or "") for x in self.films]
+				case _:
+					menu = [self.buildMenuEntry(0, _("** Unexpected menu type '%s'!") % history[self.HISTORY_TYPE], "empty", "")]
+					print(f"Unexpected menu type '{history[self.HISTORY_TYPE]}'!")
+			self["menu"].setList(menu)
+			self["menu"].setCurrentIndex(history[self.HISTORY_INDEX])
+			self.setTitle(history[self.HISTORY_TITLE])
+			if self.history:
+				self["key_red"].setText(_("Back"))
+				self["previousMenuAction"].setEnabled(True)
+			else:
+				self["key_red"].setText(_("Close"))
+				self["previousMenuAction"].setEnabled(False)
 
-			self.session.open(TryQuitMainloop, 3)
+	def keyTopMenu(self):
+		self.keyPreviousMenu(top=True)
 
-	def openPlutoSettings(self, callback=None):
-		self.session.openWithCallback(self.restartEnigma2, PlutoTVConfig)
+	def keySelectRegion(self):
+		def keySelectRegionCallback(answer):
+			if answer and answer != self.region:
+				self.region = answer
+				self.setTitle(self.baseTitle)
+				self["loading"].setText(self.loadingMsg)
+				self["loading"].show()
+				self.categoryTimer.start(25, True)
+
+		selectionList = [(x[1], x[0]) for x in config.plugins.PlutoTV.region.getSelectionList()]
+		selectionIndex = config.plugins.PlutoTV.region.getIndex()
+		self.session.openWithCallback(keySelectRegionCallback, MessageBox, _("Select the VOD region to be viewed:"), MessageBox.TYPE_YESNO, list=selectionList, default=selectionIndex, windowTitle=self.baseTitle)
+
+	def getMenuSelection(self):
+		# print(f"[PlutoTV] getMenuSelection DEBUG: Count={self["menu"].count()}, Index={self["menu"].getCurrentIndex()}, Entry={self["menu"].getCurrent()}")
+		return (self["menu"].getCurrentIndex(),) + self["menu"].getCurrent()
 
 
-class Pluto_Player(MoviePlayer):
+class PlutoDownloader:
+	def start(self, filename, sourcefile, overwrite=False):
+		def downloadWithRequests(url, filename, timeout=30):
+			def download():
+				try:
+					if "missing.png" in url or "MISSING" in url:
+						# print("[PlutoTV] Don't bother fetching the 'missing.png' or 'MISSING' picons!")
+						pass
+					else:
+						response = get(url, timeout=timeout)
+						response.raise_for_status()
+						with open(filename, 'wb') as fd:
+							fd.write(response.content)
+					return filename
+				except Exception as err:
+					print(f"[PlutoTV] download DEBUG: Error in download!  ({err})")
 
-	ENABLE_RESUME_SUPPORT = False  # Don't use Enigma2 resume support. We use self resume support
+			try:
+				return threads.deferToThread(download)
+			except Exception as err:
+				print(f"[PlutoTV] downloadWithRequests DEBUG: Error in deferToThread!  ({err})")
 
-	def __init__(self, session, service, sid):
-		self.mpservice = service
-		self.id = sid
-		MoviePlayer.__init__(self, session, service)
-		self.end = False
-		self.started = False
-		self.skinName = ["MoviePlayer"]
-
-		self.__event_tracker = ServiceEventTracker(
-			screen=self,
-			eventmap={
-				iPlayableService.evStart: self.__serviceStarted,
-				iPlayableService.evBuffering: self.__serviceStarted,
-				iPlayableService.evVideoSizeChanged: self.__serviceStarted,
-				iPlayableService.evEOF: self.__evEOF,
-			},
-		)
-
-		self["actions"] = ActionMap(
-			["MoviePlayerActions", "OkCancelActions", "NumberActions", "EPGSelectActions"],
-			{
-				"cancel": self.leavePlayer,
-				"exit": self.leavePlayer,
-				"leavePlayer": self.leavePlayer,
-				"ok": self.toggleShow,
-			},
-			-3,
-		)
-		self.session.nav.playService(self.mpservice)
-
-	def up(self):
-		pass
-
-	def down(self):
-		pass
-
-	def doEofInternal(self, playing):
-		self.close()
-
-	def __evEOF(self):
-		self.end = True
-
-	def __serviceStarted(self):
-		service = self.session.nav.getCurrentService()
-		seekable = service.seek()
-		last, length = getResumePoint(self.id)
-		if last is None:
-			return
-		if seekable is None:
-			return
-		length = seekable.getLength() or (None, 0)
-		print("[PlutoTV] seekable.getLength() returns:", length)
-		# Hmm, this implies we don't resume if the length is unknown...
-		if (last > 900000) and (not length[1] or (last < length[1] - 900000)):
-			self.resume_point = last
-			_l = last / 90000
-			if not self.started:
-				self.started = True
-				Notifications.AddNotificationWithCallback(
-					self.playLastCB,
-					MessageBox,
-					_("Do you want to resume this playback?")
-					+ "\n"
-					+ (_("Resume position at %s") % ("%d:%02d:%02d" % (_l / 3600, _l % 3600 / 60, _l % 60))),
-					timeout=10,
-					default="yes" in config.usage.on_movie_start.value,
-				)
-
-	def leavePlayer(self):
-		laref = _("Stop play and exit to list movie?")
 		try:
-			dei = self.session.openWithCallback(self.callbackexit, MessageBox, laref, MessageBox.TYPE_YESNO)
-			dei.setTitle(_("Stop play"))
-		except Exception:
-			self.callbackexit(True)
+			if not filename or not sourcefile:
+				return defer.fail(Exception("[PlutoTV] PlutoDownloader Error: Wrong arguments!"))
+			if not overwrite and exists(filename) and getsize(filename):
+				return defer.succeed(filename)
+			return downloadWithRequests(sourcefile, filename, timeout=30).addCallback(self.downloadDone, filename).addErrback(self.downloadFail, sourcefile)
+		except Exception as err:
+			print(f"[PlutoTV] start DEBUG: Error in download!  ({err})")
 
-	def callbackexit(self, respuesta):
-		if respuesta:
-			self.is_closing = True
-			setResumePoint(self.session, self.id)
-			self.close()
+	def downloadDone(self, result, path):
+		# print(f"[PlutoTV] PlutoDownloader DEBUG: File '{path}' downloaded.")
+		try:
+			if not getsize(path):
+				raise Exception(f"[PlutoTV] downloadDone Error: File '{path}' is empty!")
+		except OSError as err:
+			raise (err)
+		else:
+			return path
 
-	def leavePlayerConfirmed(self, answer):
-		pass
-
-	def exit(self):
-		self.callbackexit(True)
-
-
-class _ConfigList(ConfigList):
-	def __init__(self, _list, session=None):
-		super(_ConfigList, self).__init__(_list, session)
-		self.__cfg_none = {}
-
-	def isChanged(self):
-		is_changed = False
-		for x in iter(self.list):
-			if len(x) > 1:
-				is_changed |= x[1].isChanged()
-		for x in self.cfg_none.values():
-			is_changed |= x.isChanged()
-		return is_changed
-
-	@property
-	def cfg_none(self):
-		return self.__cfg_none
+	def downloadFail(self, error, path):
+		print(f"[PlutoTV] downloadFail Error: Failed to download '{path}'!  ({error})")
+		return error
 
 
-class PlutoTVConfig(Screen, ConfigListScreen):
-	if screenWidth and screenWidth == 1920:
-		skin = """<screen position="center,center" size="909,800" title="" backgroundColor="#80ffffff" flags="wfNoBorder" name="plutotvConfigScreen">
-		<widget name="config" position="15,79" size="879,624" font="Regular;30"  scrollbarMode="showOnDemand" itemHeight="39" zPosition="1" transparent="1" />
-		<eLabel name="bg conf" position="2,63" size="906,735" backgroundColor="#20000000" />
-		<eLabel name="bg title" position="2,2" size="906,60" backgroundColor="#20000000" />
-		<widget name="title" position="2,2" size="906,60" font="Regular;36" backgroundColor="#20000000" foregroundColor="#00ffffff" zPosition="1" halign="center" valign="center" />
-		<eLabel name="button green" position="690,770" size="200,8" backgroundColor="green" zPosition="1" />
-		<widget name="F2" position="690,725" size="200,39" transparent="1" font="Regular;35" backgroundColor="#26181d20" foregroundColor="#00ffffff" valign="center" halign="center" zPosition="1" />
-		</screen>"""
-	else:
-		skin = """<screen position="center,center" size="606,525" title="" backgroundColor="#80ffffff" flags="wfNoBorder" name="plutotvConfigScreen">
-		<widget name="config" position="10,53" size="586,412" font="Regular;20" scrollbarMode="showOnDemand" itemHeight="26" zPosition="1" transparent="1" />
-		<eLabel name="bg conf" position="1,42" size="604,482" backgroundColor="#20000000" />
-		<eLabel name="bg title" position="1,1" size="604,40" backgroundColor="#20000000" />
-		<widget name="title" position="1,1" size="604,40" font="Regular;26" backgroundColor="#20000000" foregroundColor="#00ffffff" zPosition="1" halign="center" valign="center" />
-		<eLabel name="button green" position="460,505" size="133,5" backgroundColor="green" zPosition="1" />
-		<widget name="F2" position="460,478" size="133,26" transparent="1" font="Regular;16" backgroundColor="#26181d20" foregroundColor="#00ffffff" valign="center" halign="center" zPosition="1" />
-		</screen>"""
-
+class PlutoSetup(Setup):
 	def __init__(self, session):
-		Screen.__init__(self, session)
-		self.skinName = "plutotvConfigScreen"
-		self["F2"] = Label(_("Ok"))
-		self["title"] = Label()
-		self["setupActions"] = ActionMap(
-			["SetupActions", "ColorActions"],
-			{
-				"cancel": self.keyCancel,
-				"red": self.keyCancel,
-				"green": self._keyOK,
-				"right": self._keyRight,
-			},
-			-2,
-		)
-		self.testLatin = False
-		self.config_list = None
-		ConfigListScreen.__init__(self, self.config_list, session=session, on_change=self._onKeyChange)
-		self["config"] = _ConfigList(self.config_list, session=session)
-		self._getConfig()
-		self.onLayoutFinish.append(self.layoutFinished)
+		self.choices = list(PLUTO_DATA.keys())
+		self.baseConfigLength = None
+		Setup.__init__(self, session=session, setup="PlutoTV", plugin="Extensions/PlutoTV")
+		self["key_yellow"] = StaticText()
+		self["key_blue"] = StaticText()
+		description = _("Pluto TV Actions")
+		self["manageAction"] = HelpableActionMap(self, ["ColorActions"], {
+			"yellow": (self.keyManageBouquet, _("Add/Delete a Pluto TV bouquet"))
+		}, prio=0, description=description)
+		self["bouquetAction"] = HelpableActionMap(self, ["ColorActions"], {
+			"blue": (self.keyUpdateBouquets, _("Remove a Pluto TV bouquet"))
+		}, prio=0, description=description)
+		self.initialRegions = self.buildRegionList()
 
-	def _getConfig(self):
-		self.config_list = []
-		self.picon_dir = getConfigListEntry(_("Picon Directory"), config.usage.picon_dir)
-		self.config_list.append(self.picon_dir)
-		self.config_list.append(getConfigListEntry(_("Start PlutoTV in Silent Mode"), config.plugins.plutotv.silentmode))
-		self.config_list.append(getConfigListEntry(_("Picon Mode"), config.plugins.plutotv.picon_mode))
-		self.config_list.append(getConfigListEntry(_("Use Latin American regions"), config.plugins.plutotv.add_latin_regions))
-		self.config_list.append(getConfigListEntry(_("Video Region"), config.plugins.plutotv.region))
-		self.config_list.append(getConfigListEntry(_("Add Samsung Channels to bouquets"), config.plugins.plutotv.add_samsung))
-		self.config_list.append(getConfigListEntry(_("Add Xiaomi Channels to bouquets"), config.plugins.plutotv.add_xiaomi))
-		self.config_list.append(getConfigListEntry(_("Live TV Mode"), config.plugins.plutotv.live_tv_mode))
-		self.config_list.append(getConfigListEntry(_("Live TV Channel Numbering"), config.plugins.plutotv.live_tv_ch_numbering))
+	def buildRegionList(self):
+		regions = []
+		for index in range(config.plugins.PlutoTV.bouquetCount.value):
+			regions.append(config.plugins.PlutoTV.bouquetRegion[index].value)
+		return sorted(regions)
 
-		self._separator("— {0} {1}".format(_("Pluto TV Bouquets"), 200 * "—"))
-		self.config_list.append(getConfigListEntry("1. {0}".format(_("Bouquet")), config.plugins.plutotv.ch_region_1, True))
-		if config.plugins.plutotv.ch_region_1.value != "none":
-			self.config_list.append(
-				getConfigListEntry("   • {0}".format(_("Player Service")), config.plugins.plutotv.service_1)
-			)
+	def updateControls(self):
+		current = self["config"].getCurrent()
+		if len(current) > 3:
+			self["key_yellow"].setText(_("Delete Bouquet"))
+			self["manageAction"].setEnabled(True)
+		else:
+			if self.getChoices():
+				self["key_yellow"].setText(_("Add Bouquet"))
+			else:
+				self["key_yellow"].setText("")
+				self["manageAction"].setEnabled(False)
+		if config.plugins.PlutoTV.bouquetCount.value:
+			self["key_blue"].setText(_("Update Bouquets"))
+			self["bouquetAction"].setEnabled(True)
+		else:
+			self["key_blue"].setText("")
+			self["bouquetAction"].setEnabled(False)
+		if len(current) > 3 and config.plugins.PlutoTV.bouquetCount.value:
+			last = int(fileReadLine(PLUTO_TIMER_PATH, default="0", source=MODULE_NAME))
+			self.setFootnote(f"{_("Pluto TV bouquets last updated")} {strftime(f"{config.usage.date.daylong.value}  {config.usage.time.long.value}", localtime(last))}")
 
-		if config.plugins.plutotv.ch_region_1.value != "none" or config.plugins.plutotv.ch_region_2.value != "none":
-			self.config_list.append(getConfigListEntry("2. {0}".format(_("Bouquet")), config.plugins.plutotv.ch_region_2, True))
-			if config.plugins.plutotv.ch_region_2.value != "none":
-				self.config_list.append(
-					getConfigListEntry("   • {0}".format(_("Player Service")), config.plugins.plutotv.service_2)
-				)
+	def getChoices(self, choice=None):
+		choices = self.choices[:]
+		for index in range(config.plugins.PlutoTV.bouquetCount.value):
+			value = config.plugins.PlutoTV.bouquetRegion[index].value
+			if choice != value and value in choices:
+				choices.remove(value)
+		return sorted([(x, PLUTO_DATA[x][PLUTO_COUNTRY_NAME]) for x in choices], key=lambda x: x[1])
 
-		if config.plugins.plutotv.ch_region_2.value != "none" or config.plugins.plutotv.ch_region_3.value != "none":
-			self.config_list.append(getConfigListEntry("3. {0}".format(_("Bouquet")), config.plugins.plutotv.ch_region_3, True))
-			if config.plugins.plutotv.ch_region_3.value != "none":
-				self.config_list.append(
-					getConfigListEntry("   • {0}".format(_("Player Service")), config.plugins.plutotv.service_3)
-				)
+	def keyManageBouquet(self):
+		current = self["config"].getCurrent()
+		if len(current) > 3:
+			config.plugins.PlutoTV.bouquetCount.value -= 1
+			config.plugins.PlutoTV.bouquetRegion.pop(current[3])
+			config.plugins.PlutoTV.bouquetService.pop(current[3])
+			index = self["config"].getCurrentIndex()
+			self.createSetup()
+			length = self.baseConfigLength + (config.plugins.PlutoTV.bouquetCount.value * 2) if config.plugins.PlutoTV.bouquetCount.value else self.baseConfigLength - 1
+			if index >= length:
+				index = length
+		else:
+			choices = self.getChoices()
+			config.plugins.PlutoTV.bouquetCount.value += 1
+			default = list(choices)[0]
+			config.plugins.PlutoTV.bouquetRegion.append(ConfigSelection(default=default, choices=choices))
+			config.plugins.PlutoTV.bouquetRegion[-1].value = default
+			config.plugins.PlutoTV.bouquetService.append(ConfigSelection(default="4097", choices=PLUTO_SERVICE_CHOICES))
+			self.createSetup()
+			index = self.baseConfigLength + (config.plugins.PlutoTV.bouquetCount.value * 2) - 1
+		self["config"].setCurrentIndex(index)
+		self.updateControls()
 
-		if config.plugins.plutotv.ch_region_3.value != "none" or config.plugins.plutotv.ch_region_4.value != "none":
-			self.config_list.append(getConfigListEntry("4. {0}".format(_("Bouquet")), config.plugins.plutotv.ch_region_4, True))
-			if config.plugins.plutotv.ch_region_4.value != "none":
-				self.config_list.append(
-					getConfigListEntry("   • {0}".format(_("Player Service")), config.plugins.plutotv.service_4)
-				)
+	def keyUpdateBouquets(self):
+		def keyUpdateBouquetsCallback():
+			# if config.plugins.PlutoTV.updateTimer.value:  # isfile(PLUTO_TIMER_PATH):
+			# 	self.setFootnote(_("Pluto TV bouquets will be updated again in %s hours.") % config.plugins.PlutoTV.updateTimer.value)
+			self.updateControls()
 
-		if config.plugins.plutotv.ch_region_4.value != "none" or config.plugins.plutotv.ch_region_5.value != "none":
-			self.config_list.append(getConfigListEntry("5. {0}".format(_("Bouquet")), config.plugins.plutotv.ch_region_5, True))
-			if config.plugins.plutotv.ch_region_5.value != "none":
-				self.config_list.append(
-					getConfigListEntry("   • {0}".format(_("Player Service")), config.plugins.plutotv.service_5)
-				)
-		self._separator()
-		self["config"].setList(self.config_list)
+		self.session.openWithCallback(keyUpdateBouquetsCallback, PlutoUpdate)
 
 	def layoutFinished(self):
-		from . import __version__
+		Setup.layoutFinished(self)
+		self.updateControls()
 
-		self["title"].setText("PlutoTV - Setup - (Version {0})".format(__version__))
-		self["config"].onSelectionChanged.append(self.selectionChanged)
-		self.testLatin = True
-
-	def _keyOK(self):
-		if any([config.usage.picon_dir.isChanged(), config.plugins.plutotv.add_latin_regions.isChanged()]):
-			self.session.openWithCallback(
-				self.saveSettingsAndClose,
-				MessageBox,
-				_("The Enigma2 settings was changed and Enigma2 should be restarted\n\nDo you want to restart it now?"),
-				type=MessageBox.TYPE_YESNO,
-			)
-		elif any(
-			[
-				config.plugins.plutotv.live_tv_ch_numbering.isChanged(),
-				config.plugins.plutotv.silentmode.isChanged(),
-				config.plugins.plutotv.region.isChanged(),
-				config.plugins.plutotv.picon_mode.isChanged(),
-				config.plugins.plutotv.ch_region_1.isChanged(),
-				config.plugins.plutotv.ch_region_2.isChanged(),
-				config.plugins.plutotv.ch_region_3.isChanged(),
-				config.plugins.plutotv.ch_region_4.isChanged(),
-				config.plugins.plutotv.ch_region_5.isChanged(),
-				config.plugins.plutotv.add_samsung.isChanged(),
-				config.plugins.plutotv.add_xiaomi.isChanged(),
-				config.plugins.plutotv.live_tv_mode.isChanged(),
-				config.plugins.plutotv.service_1.isChanged(),
-				config.plugins.plutotv.service_2.isChanged(),
-				config.plugins.plutotv.service_3.isChanged(),
-				config.plugins.plutotv.service_4.isChanged(),
-				config.plugins.plutotv.service_5.isChanged(),
-			]
-		):
-			if config.plugins.plutotv.picon_mode.isChanged() or (
-				config.plugins.plutotv.live_tv_ch_numbering.isChanged() and config.plugins.plutotv.picon_mode.value == "srp"
-			):
-				self.session.open(
-					MessageBox,
-					_("The PlutoTV Picons should be deleted before the next Bouquet update."),
-					type=MessageBox.TYPE_INFO,
-					timeout=10,
-				)
-			self.saveSettingsAndClose(callback=True, pluto_restart=True)
-		else:
-			self.saveSettingsAndClose()
-
-	def saveSettingsAndClose(self, callback=False, pluto_restart=False):
-		if callback:
-			self.saveAll()
-		self.close(*(callback, pluto_restart))
+	def createSetup(self):
+		Setup.createSetup(self)
+		configList = self["config"].getList()
+		if self.baseConfigLength is None:
+			self.baseConfigLength = len(configList)
+		configList = configList[:self.baseConfigLength]
+		if config.plugins.PlutoTV.bouquetCount.value:
+			configList.append(getConfigListEntry(_("--- Pluto TV Bouquets ---")))
+			for count in range(config.plugins.PlutoTV.bouquetCount.value):
+				configList.append(getConfigListEntry(_("Bouquet %s region") % (count + 1), config.plugins.PlutoTV.bouquetRegion[count], _("Select the region for which a bouquet will be created."), count, True))
+				configList.append(getConfigListEntry((_("Bouquet %s service type") % (count + 1), 1), config.plugins.PlutoTV.bouquetService[count], _("Select the service type to be used for the region bouquet."), count, False))
+		self["config"].setList(configList)
 
 	def selectionChanged(self):
-		if self.testLatin and config.plugins.plutotv.add_latin_regions.isChanged():
-			self.session.openWithCallback(
-				self.onLatinChanged,
-				MessageBox,
-				_("The Latin American setting was changed and Enigma2 should be restarted\n\nDo you want to restart it now?"),
-				type=MessageBox.TYPE_YESNO,
-			)
+		Setup.selectionChanged(self)
+		current = self["config"].getCurrent()
+		if len(current) > 4 and current[4]:
+			index = current[3]
+			default = config.plugins.PlutoTV.bouquetRegion[index].value
+			config.plugins.PlutoTV.bouquetRegion[index].setSelectionList(self.getChoices(default))
+		self.updateControls()
 
-	def onLatinChanged(self, answer=False):
-		if answer:
-			self.saveSettingsAndClose(callback=answer)
+	def keySave(self):
+		def keySaveCallback():
+			Setup.keySave(self)
+
+		config.plugins.PlutoTV.bouquetCount.save()  # These are not in the basic ConfigList so need to be saved separately.
+		config.plugins.PlutoTV.bouquetRegion.save()
+		config.plugins.PlutoTV.bouquetService.save()
+		if config.plugins.PlutoTV.piconMode.isChanged() or (config.plugins.PlutoTV.channelNumbering.isChanged() and config.plugins.PlutoTV.piconMode.value == "srp"):
+			self.session.open(MessageBox, _("NOTE: Pluto TV picons should be deleted before the next bouquet update."), type=MessageBox.TYPE_INFO, timeout=10, windowTitle=self.getTitle())
+		removeRegions = self.initialRegions[:]
+		updateRegions = []
+		for region in self.buildRegionList():
+			if region in self.initialRegions:
+				removeRegions.remove(region)
+			else:
+				updateRegions.append(region)
+		if removeRegions:
+			serviceHandler = eServiceCenter.getInstance()
+			mutableList = serviceHandler.list(eServiceReference("1:7:1:0:0:0:0:0:0:0:FROM BOUQUET \"bouquets.tv\" ORDER BY bouquet")).startEdit()
+			changed = False
+			for region in removeRegions:
+				print(f"[PlutoTV] Remove bouquet for region '{PLUTO_DATA[region][PLUTO_COUNTRY_NAME]}'.")
+				bouquetReference = eServiceReference(f"1:7:1:0:0:0:0:0:0:0:FROM BOUQUET \"userbouquet.pluto_tv_{region.lower()}.tv\" ORDER BY bouquet")
+				if bouquetReference.valid() and mutableList is not None and not mutableList.removeService(bouquetReference):
+					changed = True
+			if changed:
+				mutableList.flushChanges()
+				eDVBDB.getInstance().reloadBouquets()
+		if updateRegions:
+			self.session.openWithCallback(keySaveCallback, PlutoUpdate, bouquetRegionList=updateRegions)
 		else:
-			self.testLatin = False
+			Setup.keySave(self)
 
-	def _separator(self, txt=200 * "—"):
-		self.config_list.append(
-			getConfigListEntry(
-				txt,
-			)
-		)
+	def keyCancel(self):
+		config.plugins.PlutoTV.bouquetCount.cancel()
+		for index in range(len(config.plugins.PlutoTV.bouquetRegion)):  # These are not in the basic ConfigList so need to be canceled separately.
+			config.plugins.PlutoTV.bouquetRegion[index].cancel()
+			config.plugins.PlutoTV.bouquetService[index].cancel()
+		Setup.keyCancel(self)
 
-	def _onKeyChange(self):
-		try:
-			c = self["config"].getCurrent()
-			if c and len(c) > 2 and c[2]:
-				if c[0] not in self["config"].cfg_none and c[1].value == "none":
-					self["config"].cfg_none[c[0]] = c[1]
-				elif c[0] in self["config"].cfg_none and c[1].value != "none":
-					self["config"].cfg_none.pop(c[0])
-				self._getConfig()
-		except Exception as err:
-			print("[PlutoTV] Error: {}".format(err))
 
-	def saveAll(self):
-		for x in iter(self["config"].list):
-			if len(x) > 1:
-				x[1].save()
-		for x in self["config"].cfg_none.values():
-			x.save()
-		self["config"].cfg_none.clear()
+class PlutoPlayer(MoviePlayer):
+	ENABLE_RESUME_SUPPORT = False  # Don't use Enigma2 resume support. We use our own resume support.
 
-	def cancelConfirm(self, result):
-		if not result:
+	def __init__(self, session, service, identifier):
+		MoviePlayer.__init__(self, session, service)
+		self.skinName = ["MoviePlayer"]
+		self.identifier = identifier
+		self.started = False
+		self.__event_tracker = ServiceEventTracker(screen=self, eventmap={
+			# iPlayableService.evStart: self.__serviceStarted, -> InfoBarCueSheetSupport
+			iPlayableService.evBuffering: self.__serviceStarted,  # -> May not be needed.
+			iPlayableService.evVideoSizeChanged: self.__serviceStarted  # -> May not be needed.
+			# iPlayableService.evEOF: self.__evEOF, -> InfoBarSeek
+		})
+		self.session.nav.playService(service)
+
+	def __serviceStarted(self):  # Overwrite method from InfoBarCueSheetSupport.
+		service = self.session.nav.getCurrentService()
+		seekable = service.seek()
+		last, length = getResumePoint(self.identifier)
+		if last is None or seekable is None:
 			return
-		for x in iter(self["config"].list):
-			if len(x) > 1:
-				x[1].cancel()
-		for x in self["config"].cfg_none.values():
-			x.cancel()
+		length = seekable.getLength() or (None, 0)
+		# print(f"[PlutoTV] DEBUG: seekable.getLength() returned '{length}'.")
+		if (last > 900000) and (not length[1] or (last < length[1] - 900000)):  # This implies we don't resume if the length is unknown.
+			self.resume_point = last
+			last = int(last // 90000)
+			if not self.started:
+				self.started = True
+				msg = []
+				msg.append(_("Resume position at %s") % f"{last // 3600}:{last % 3600 // 60:02d}:{last % 60:02d}")
+				msg.append("")
+				msg.append(_("Do you want to resume playback?"))
+				AddNotificationWithCallback(self.playLastCB, MessageBox, "\n".join(msg), timeout=10, default="yes" in config.usage.on_movie_start.value.lower())
+
+	def doEofInternal(self, playing):  # Overwrite method from MoviePlayer.
 		self.close()
 
-	def _keyRight(self):
-		cur = self["config"].getCurrent()
-		if cur == self.picon_dir:
-			ConfigListScreen.keyOK(self)
-		else:
-			ConfigListScreen.keyRight(self)
+	def leavePlayer(self):  # Overwrite method from MoviePlayer.
+		def leavePlayerCallback(answer):
+			if answer:
+				self.is_closing = True
+				setResumePoint(self.session, self.identifier)
+				self.close()
+
+		self.session.openWithCallback(leavePlayerCallback, MessageBox, _("Stop playing this movie?"), MessageBox.TYPE_YESNO, windowTitle=_("Pluto TV Movie Player"))
+
+	def leavePlayerOnExit(self):  # Overwrite method from MoviePlayer.
+		self.leavePlayer()
 
 
-def autostart(reason, session):
-	if PlutoDownload.Silent is None:
-		PlutoDownload.Silent = PlutoDownload.DownloadSilent(session)
+class PlutoUpdater:
+	EXIT_IDLE = 0
+	EXIT_DONE = 0
+	EXIT_RUNNING = 1
+	EXIT_ABORT = 2
+	EXIT_ERROR = 3
+
+	CHANNEL_NUMBER = 0
+	CHANNEL_IDENTIFIER = 1
+	CHANNEL_NAME = 2
+	CHANNEL_PICON_URL = 3
+	CHANNEL_SERVICE_URL = 4
+
+	TV_SERVICE_TYPES = ("1:7:1:0:0:0:0:0:0:0:(type == 1) || (type == 17) || (type == 22) || (type == 25) || (type == 134) || (type == 195)")
+
+	def __init__(self, verbose):
+		self.verbose = verbose
+		self.bouquetRegionList = []
+		self.updateActive = False
+		self.abort = False
+		# self.timer = eTimer()
+		# self.timer.callback.append(self.uiUpdate)
+
+	def uiUpdate(self, action=None, progress=None, status=None, pause=0):
+		if self.verbose:
+			if action is not None:
+				self.setTitle(action)
+				self["action"].setText(action)
+			if progress is not None:
+				self["progress"].setValue(progress)
+				self["percentage"].setText(f"{progress}%")
+			if status is not None:
+				self["status"].setText(status)
+			# self.timer.start(1, True)
+			if pause:
+				sleep(pause)
+
+	def updateThread(self):
+		def assignNumber():
+			if identifier in serviceNumbers:
+				number = serviceNumbers[identifier]["number"]
+			else:
+				number = serviceNumbers["lastNumber"] + 1
+				if number <= 65535:
+					serviceNumbers["lastNumber"] = number
+					number = f"{number:X}"  # Convert the number to hexadecimal.
+					serviceNumbers[identifier] = {}
+					serviceNumbers[identifier]["number"] = number
+					serviceNumbers[identifier]["name"] = name
+					serviceNumbersModified = True
+				else:
+					self.uiUpdate(status=_("Error: Generated channel number too big!  (%s)") % number)
+					number = None
+			# print(f"[PlutoTV] ALERT: Identifier '{identifier}, name '{name}' number '{number}'.")
+			return number
+
+		if self.updateActive:
+			print("[PlutoTV] Carousel update is already in progress.")
+			return self.EXIT_RUNNING
+		self.updateActive = True
+		self.abort = False
+		print("[PlutoTV] Carousel update started.")
+		result = self.EXIT_DONE
+		bouquetRegionList = self.bouquetRegionList if self.bouquetRegionList else [x.value for x in config.plugins.PlutoTV.bouquetRegion]
+		serviceTypes = {}
+		for index in range(len(config.plugins.PlutoTV.bouquetRegion)):
+			serviceTypes[config.plugins.PlutoTV.bouquetRegion[index].value] = config.plugins.PlutoTV.bouquetService[index].value
+		categories = []
+		channelList = {}
+		guideList = {}
+		addSamsung = config.plugins.PlutoTV.addSamsung.value
+		if not addSamsung:
+			print("[PlutoTV] Samsung categories will not being added.")
+		addXiaomi = config.plugins.PlutoTV.addXiaomi.value
+		if not addXiaomi:
+			print("[PlutoTV] Xiaomi TV categories will not being added.")
+		self.liveMode = config.plugins.PlutoTV.liveMode.value
+		self.channelNumbering = config.plugins.PlutoTV.channelNumbering.value
+		self.piconMode = config.plugins.PlutoTV.piconMode.value
+		# print(f"[PlutoTV] DEBUG: bouquetRegionList={bouquetRegionList}.")
+		# print(f"[PlutoTV] DEBUG: serviceTypes={serviceTypes}.")
+		# print(f"[PlutoTV] DEBUG: addSamsung={addSamsung}.")
+		# print(f"[PlutoTV] DEBUG: addXiaomi={addXiaomi}.")
+		# print(f"[PlutoTV] DEBUG: self.liveMode='{self.liveMode}'.")
+		# print(f"[PlutoTV] DEBUG: self.channelNumbering='{self.channelNumbering}'.")
+		# print(f"[PlutoTV] DEBUG: self.piconMode='{self.piconMode}'.")
+		try:
+			epgCache = eEPGCache.getInstance()
+			serviceNumbers = {"lastNumber": 0}
+			serviceNumbersModified = False
+			if isfile(PLUTO_SERVICE_NUMBER_PATH):
+				print("[PlutoTV] Reading service numbers.")
+				try:
+					with open(PLUTO_SERVICE_NUMBER_PATH, "rb") as fd:
+						serviceNumbers = load(fd)
+				except OSError as err:
+					print(f"[PlutoTV] Error {err.errno}: Unable to load service numbers '{PLUTO_SERVICE_NUMBER_PATH}'!  ({err.strerror})")
+			# else:
+			# 	print(f"[PlutoTV] DEBUG: No service numbers to load, service number file '{PLUTO_SERVICE_NUMBER_PATH}' doesn't exist.")
+			for region in bouquetRegionList:
+				if self.abort:
+					break
+				print(f"[PlutoTV] Fetching {PLUTO_DATA[region][PLUTO_COUNTRY_NAME]} carousel data.")
+				progress = 0
+				self.uiUpdate(action=_("Pluto TV Update - %s") % PLUTO_DATA[region][PLUTO_COUNTRY_NAME], progress=progress, status=_("Fetching %s carousel data.") % PLUTO_DATA[region][PLUTO_COUNTRY_NAME], pause=0.5)
+				param = {
+					"deviceId": DEVICEID1_HEX,
+					"sid": SID1_HEX
+				}
+				header = buildHeader(PLUTO_DATA[region][PLUTO_IP])
+				channels = sorted(fetchURL(PLUTO_LINEUP_URL, header=header, param=param), key=lambda x: x["number"])
+				# channelsDump(region, channels)
+				channelCount = len(channels)
+				if self.abort:
+					break
+				print("[PlutoTV] Building category and channel lists.")
+				progress += 1
+				self.uiUpdate(progress=progress, status=_("Building category and channel lists."), pause=0.5)
+				for channel in channels:
+					# identifier = channel.get("_id", "")
+					# slug = channel.get("slug", "")
+					# name = channel.get("name", "")
+					# hash = channel.get("hash", "")
+					# number = channel.get("number", 0)
+					# summary = channel.get("summary", "")
+					# visibility = channel.get("visibility", "")
+					# onDemandDescription = channel.get("onDemandDescription", "")
+					# category = channel.get("category", "")
+					# plutoOfficeOnly = channel.get("plutoOfficeOnly", False)
+					# directOnly = channel.get("directOnly", False)
+					# chatRoomId = channel.get("chatRoomId", -1)
+					# cohortMask = channel.get("cohortMask", 0)
+					# featuredImage = channel.get("featuredImage", {})  # Typically key "path" as a URL to a background or screen shot image.
+					# thumbnail = channel.get("thumbnail", {})  # Typically key "path" as a URL to a background or screen shot image.
+					# tile = channel.get("tile", {})  # Typically key "path" as a URL to a background or screen shot image.
+					# logo = channel.get("logo", {})  # Typically key "path" as a URL to a background or screen shot image.
+					# colorLogoSVG = channel.get("colorLogoSVG", {})  # Typically key "path" as a URL to a background or screen shot image.
+					# colorLogoPNG = channel.get("colorLogoPNG", {})  # Typically key "path" as a URL to a background or screen shot image.
+					# solidLogoSVG = channel.get("solidLogoSVG", {})  # Typically key "path" as a URL to a background or screen shot image.
+					# solidLogoPNG = channel.get("solidLogoPNG", {})  # Typically key "path" as a URL to a background or screen shot image.
+					# featured = channel.get("featured", False)
+					# featuredOrder = channel.get("featuredOrder", 0)
+					# favorite = channel.get("favorite", False)
+					# isStitched = channel.get("isStitched", False)
+					# stitched = channel.get("stitched", {})  # Typically keys "urls" and "sessionURL" with "urls" a list of dictionaries with keys "type" and "url".
+					# tmsid = channel.get("tmsid", "")
+					if self.abort:
+						break
+					category = channel.get("category", "")
+					if category == "Samsung" and not addSamsung:
+						continue
+					if category == "Xiaomi TV" and not addXiaomi:
+						continue
+					urls = channel.get("stitched", {}).get("urls")
+					if not isinstance(urls, list) or len(urls) == 0:
+						print("[PlutoTV] Categories without URLs are not being added.")
+						continue
+					identifier = channel["_id"]
+					match self.liveMode:
+						case "original":
+							urls = [updateQuery(url["url"], {
+								"deviceType": "web",
+								"deviceMake": "Chrome",
+								"deviceModel": "web",
+								"appName": "web",
+								"deviceId": "bc83a564-4b91-11ef-8a44-83c5e90e038f"
+							}) for url in urls if url["type"].lower() == "hls"][0]
+						case "roku":
+							urls = "&".join((
+								f"http%3a//stitcher-ipv4.pluto.tv/v1/stitch/embed/hls/channel/{identifier}/master.m3u8?deviceId=PSID",
+								"deviceModel=web",
+								"deviceVersion=1.0",
+								"appVersion=1.0",
+								"deviceType=rokuChannel",
+								"deviceMake=rokuChannel",
+								"deviceDNT=1"
+							))
+						case "samsung":
+							urls = "&".join((
+								f"http%3a//stitcher-ipv4.pluto.tv/v1/stitch/embed/hls/channel/{identifier}/master.m3u8?deviceId=PSID",
+								"deviceModel=web",
+								"deviceVersion=1.0",
+								"appVersion=1.0",
+								"deviceType=rokuChannel",
+								"deviceMake=rokuChannel",
+								"deviceDNT=1"
+							))
+					if category not in channelList.keys():
+						categories.append(category)
+						channelList[category] = []
+					name = channel["name"]
+					if self.channelNumbering == "original":
+						match category:
+							case "Samsung":
+								number = identifier[-4:].upper().lstrip("0")
+							case "Xiaomi TV":
+								number = identifier[-4:].upper().lstrip("0")
+							case _:
+								number = channel["number"]
+								if not number:
+									number = assignNumber()
+									if number is None:
+										result = self.EXIT_ERROR
+										break
+					else:
+						number = assignNumber()
+						if number is None:
+							result = self.EXIT_ERROR
+							break
+					piconURL = channel.get("colorLogoPNG", {}).get("path", None)
+					channelList[category].append((number, identifier, name, piconURL, urls))
+				if self.abort:
+					break
+				if categories:
+					print(f"[PlutoTV] Building bouquet '{region}' for '{PLUTO_DATA[region][PLUTO_COUNTRY_NAME]}'.")
+					progress += 1
+					self.uiUpdate(progress=progress, status=_("Building bouquet '%s' for '%s'.") % (region, PLUTO_DATA[region][PLUTO_COUNTRY_NAME]))
+					bouquet = f"userbouquet.pluto_tv_{region.lower()}.tv"
+					serviceReferences = {}
+					bouquetData = []
+					bouquetData.append(f"#NAME Pluto TV {region} (TV)")
+					serviceType = serviceTypes[region]
+					increment = 48.0 / channelCount  # This part of the processing constitutes 49% of the total progress.
+					for counter, category in enumerate(categories):
+						if self.abort:
+							break
+						bouquetData.append(f"#SERVICE 1:64:{counter}:0:0:0:0:0:0:0::{category}")
+						if config.plugins.PlutoTV.addDescriptions.value:
+							bouquetData.append(f"#DESCRIPTION {category}")
+						for channel in channelList[category]:
+							if self.abort:
+								break
+							number = channel[self.CHANNEL_NUMBER]
+							name = channel[self.CHANNEL_NAME]
+							progress += increment
+							self.uiUpdate(progress=round(progress), status=_("Downloading '%s' picon.") % name, pause=0.1)
+							tids = PLUTO_DATA[region][PLUTO_TIDS]
+							bouquetData.append(f"#SERVICE {serviceType}:0:1:{number}:{tids}:0:0:0:0:0:{channel[self.CHANNEL_SERVICE_URL].replace(":", "%3A")}:{name.replace(":", "%3A")}")
+							if config.plugins.PlutoTV.addDescriptions.value:
+								bouquetData.append(f"#DESCRIPTION {name}")
+							serviceReference = f"{serviceType}:0:1:{number}:{tids}:0:0:0:0:0"
+							serviceReferences[channel[self.CHANNEL_IDENTIFIER]] = f"{serviceReference}:0"
+							piconURL = f"{channel[self.CHANNEL_PICON_URL]}?w=220&h=132"  # Fetch the FHD resolution image.
+							match self.piconMode:
+								case "srp":
+									piconBaseName = serviceReference.replace(":", "_")
+								case "name":
+									piconBaseName = str(name).replace("/", "_")
+								case "snp":
+									piconBaseName = normalize("NFKD", name).encode("ASCII", "ignore").decode()
+									piconBaseName = sub(r"[^a-z0-9]", "", piconBaseName.replace("&", "and").replace("+", "plus").replace("*", "star").lower())
+							piconPath = join(config.plugins.PlutoTV.piconPath.value, f"{piconBaseName}.png")
+							# print(f"[PlutoTV] DEBUG: piconURL={piconURL}, piconBaseName={piconBaseName}, piconPath={piconPath}.")
+							if "missing.png" in piconURL or "MISSING" in piconURL:
+								# print("[PlutoTV] DEBUG: Don't try fetching the 'missing.png' picon!")
+								copy2(resolveFilename(SCOPE_PLUGIN_ABSOLUTE, "images/pluto_picon.png"), piconPath)
+							elif not isfile(piconPath) or config.plugins.PlutoTV.forcePiconDownload.value:
+								# print(f"[PlutoTV] DEBUG: Fetching '{piconURL}' as picon '{piconPath}'.")
+								try:
+									response = get(piconURL, timeout=30)
+									response.raise_for_status()
+									with open(piconPath, 'wb') as fd:
+										fd.write(response.content)
+								except Exception as err:
+									print(f"[PlutoTV] Error: Unable to download picon '{piconURL}' as '{piconPath}'!  ({err})")
+									copy2(resolveFilename(SCOPE_PLUGIN_ABSOLUTE, "images/pluto_picon.png"), piconPath)
+							# else:
+							# 	print(f"[PlutoTV] DEBUG: Not fetching '{piconURL}' as picon '{piconPath}' already exists.")
+					progress = round(progress)  # Eliminate any rounding errors and return progress back to an integer.
+					if not self.abort:
+						bouquetData.append("")
+						fileWriteLines(resolveFilename(SCOPE_CONFIG, bouquet), bouquetData, source=MODULE_NAME)
+					print(f"[PlutoTV] Fetching EPG for region '{PLUTO_DATA[region][PLUTO_COUNTRY_NAME]}'.")
+					self.uiUpdate(status=_("Fetching EPG data."), pause=0.5)
+					startTime = gmtime()
+					param = {
+						"start": strftime("%Y-%m-%dT%H:00:00Z", startTime),
+						"stop": strftime("%Y-%m-%dT%H:00:00Z", gmtime(mktime(startTime) + 86400)),  # UTC startTime + 24 Hours.
+						"deviceId": DEVICEID1_HEX,
+						"sid": SID1_HEX,
+					}
+					header = PLUTO_USER_AGENT
+					# Does the list of guides data need to be sorted?
+					# guides = fetchURL(PLUTO_GUIDE_URL, header=header, param=param)
+					guides = sorted(fetchURL(PLUTO_GUIDE_URL, header=header, param=param), key=lambda x: x["number"])
+					# guidesDump(region, guides)
+					guidesCount = len(guides)
+					if self.abort:
+						break
+					offset = mktime(localtime()) - mktime(gmtime())  # Calculate the time offset from UTC to local time.
+					# print(f"[PlutoTV] DEBUG: guides={len(guides)}, filter={len(list(filter(lambda x: x.get("_id"), guides)))}.")
+					# Why do we need to filter the guides?  Don't all entries have an identifier?
+					for icnt, guide in enumerate(filter(lambda x: x.get("_id"), guides)):
+						# identifier = guide.get("_id", "")
+						# slug = guide.get("slug", "")
+						# name = guide.get("name", "")
+						# hash = guide.get("hash", "")
+						# number = guide.get("number", 0)
+						# summary = guide.get("summary", "")
+						# visibility = guide.get("visibility", "")
+						# onDemandDescription = guide.get("onDemandDescription", "")
+						# category = guide.get("category", "")
+						# plutoOfficeOnly = guide.get("plutoOfficeOnly", False)
+						# directOnly = guide.get("directOnly", False)
+						# chatRoomId = guide.get("chatRoomId", -1)
+						# onDemand = guide.get("onDemand", False)
+						# cohortMask = guide.get("cohortMask", 0)
+						# featuredImage = guide.get("featuredImage", {})  # Typically key "path" as a URL to a background or screen shot image.
+						# thumbnail = guide.get("thumbnail", {})  # Typically key "path" as a URL to a background or promotional image.
+						# tile = guide.get("tile", {})  # Typically key "path" as a URL to a background or promotional image.
+						# tileGrayScale = guide.get("tileGrayScale", {})  # Typically key "path" as a URL to a background or promotional image.
+						# logo = guide.get("logo", {})  # Typically key "path" as a URL to a background or promotional image.
+						# colorLogoSVG = guide.get("colorLogoSVG", {})  # Typically key "path" as a URL to a background or promotional image.
+						# colorLogoPNG = guide.get("colorLogoPNG", {})  # Typically key "path" as a URL to a background or promotional image.
+						# solidLogoSVG = guide.get("solidLogoSVG", {})  # Typically key "path" as a URL to a background or promotional image.
+						# solidLogoPNG = guide.get("solidLogoPNG", {})  # Typically key "path" as a URL to a background or promotional image.
+						# featured = guide.get("featured", False)
+						# featuredOrder = guide.get("featuredOrder", -1)
+						# favorite = guide.get("favorite", False)
+						# isStitched = guide.get("isStitched", False)
+						# stitched = guide.get("stitched", {})  # Typically keys "urls" and "sessionURL" with "urls" a list of dictionaries with keys "type" and "url".
+						# timelines = guide.get("timelines", [{}])
+						if self.abort:
+							break
+						identifier = guide.get("_id")
+						name = guide.get("name", _("* Unknown *"))
+						self.uiUpdate(progress=icnt * 50 // guidesCount + 50, status=_("Processing '%s' guides.") % name, pause=0.1)
+						genres = set()
+						guideList[identifier] = []
+						timelines = guide.get("timelines", [])
+						# print(f"[PlutoTV] DEBUG: timelines={len(timelines)}.")
+						for timeline in timelines:
+							# identifier = timeline.get("_id", "")
+							# start = timeline.get("start", "")
+							# stop = timeline.get("stop", "")
+							# title = timeline.get("title", "")
+							# episode = timeline.get("episode", {})
+							#
+							# Episode data:
+							# identifier = episode.get("_id", "")
+							# number = episode.get("number", 0)
+							# season = episode.get("season", 0)
+							# description = episode.get("description", "")
+							# duration = episode.get("duration", 0)
+							# originalContentDuration = episode.get("originalContentDuration", 0)
+							# genre = episode.get("genre", "")
+							# subGenre = episode.get("subGenre", "")
+							# distributeAs = episode.get("distributeAs", {})  # Typical key is AVOD which is a Boolean.
+							# clip = episode.get("clip", {})  # Typically keys "actors"[], "writers"[], "directors"[], producers"[] and "originalReleaseDate".
+							# rating = episode.get("rating", "")
+							# name = episode.get("name", "")
+							# slug = episode.get("slug", "")
+							# poster = episode.get("poster", {})  # Typically key "path" as a URL to a background or promotional image.
+							# firstAired = episode.get("firstAired", "")
+							# thumbnail = episode.get("thumbnail", {})  # Typically key "path" as a URL to a background or promotional image.
+							# liveBroadcast = episode.get("liveBroadcast", False)
+							# featuredImage = episode.get("featuredImage", {})  # Typically key "path" as a URL to a background or promotional image.
+							# series = episode.get("series", {})
+							# ratingDescriptors = episode.get("ratingDescriptors", "")
+							# poster16_9 = episode.get("poster16_9", {})  # Typically key "path" as a URL to a background or promotional image.
+							# cc = episode.get("cc", False)
+							#
+							# Series data:
+							# identifier = series.get("_id", "")
+							# name = series.get("name", "")
+							# slug = series.get("slug", "")
+							# type = series.get("type", "")
+							# tile = series.get("tile", {})  # Typically key "path" as a URL to a background or promotional image.
+							# description = series.get("description", "")
+							# summary = series.get("summary", "")
+							# displayName = series.get("displayName", "")
+							# featuredImage = series.get("featuredImage", {})  # Typically key "path" as a URL to a background or promotional image.
+							# poster16_9 = series.get("poster16_9", {})  # Typically key "path" as a URL to a background or promotional image.
+							if self.abort:
+								break
+							episode = timeline.get("episode", {}) or timeline
+							series = episode.get("series", {}) or timeline
+							duration = int(episode.get("duration", "0") or "0") // 1000  # In seconds.
+							start = mktime(strptime(timeline["start"], "%Y-%m-%dT%H:%M:%S.%fZ")) + offset
+							title = series.get("name", "") or timeline.get("title", "")
+							tvPlot = series.get("description", "") or series.get("summary", "") or guide.get("description", "") or guide.get("summary", "")
+							episodeSeason = episode.get("season", 0)
+							episodeNumber = episode.get("number", 0)
+							episodeType = series.get("type", "n/a")
+							episodeName = episode["name"]
+							episodeRating = episode.get("rating", "")
+							episodeGenre = episode.get("subGenre", "")
+							episodePlot = episode.get("description", "") or tvPlot or episodeName
+							if len(episodeRating) > 0 and "Not Rated" not in episodeRating:
+								episodePlot = f"{episodePlot}\n{_("Rating")}: {f"FSK-{episodeRating}" if episodeRating.isdigit() else episodeRating}"
+							if episodeType == "tv" and (episodeSeason > 0 and episodeNumber >= 0):
+								episodePlot = f"{episodeName}\n{episodeSeason}. {_("Season, episode")} {episodeNumber}: {episodePlot}"
+							elif episodeType == "film" and episodeGenre not in ("None", ""):
+								episodePlot = f"{episodeGenre}\n{episodePlot}"
+							genre = episode.get("genre", "")
+							if any((genre in ("Classics", "Romance", "Thrillers", "Horror"), "Sci-Fi" in genre, "Action" in genre)):
+								genre = 0x10
+							elif "News" in genre or "Educational" in genre:
+								genre = 0x20
+							elif genre == "Comedy":
+								genre = 0x30
+							elif "Children" in genre:
+								genre = 0x50
+							elif genre == "Music":
+								genre = 0x60
+							elif genre == "Documentaries":
+								genre = 0xA0
+							else:
+								genre = 0
+							if genre not in genres:
+								genres.add(genre)
+								guideList[identifier].append([])
+							guideList[identifier][-1].append((int(start), duration, title, "", episodePlot, genre))
+					self.uiUpdate(progress=99)
+					if self.abort:
+						break
+					dvbDB = eDVBDB.getInstance()
+					bouquets = fileReadLines("/etc/enigma2/bouquets.tv", [], source=MODULE_NAME)
+					if bouquet not in bouquets:
+						print(f"[PlutoTV] Install bouquet for region '{PLUTO_DATA[region][PLUTO_COUNTRY_NAME]}'.")
+						bouquetRootString = "1:7:1:0:0:0:0:0:0:0:FROM BOUQUET \"bouquets.tv\" ORDER BY bouquet" if config.usage.multibouquet.value else f"{self.TV_SERVICE_TYPES} FROM BOUQUET \"userbouquet.favourites.tv\" ORDER BY bouquet"
+						bouquetRoot = eServiceReference(bouquetRootString)
+						serviceHandler = eServiceCenter.getInstance()
+						mutableBouquetList = serviceHandler.list(bouquetRoot).startEdit()
+						if mutableBouquetList:
+							newBouquetReference = eServiceReference(f"1:7:1:0:0:0:0:0:0:0:FROM BOUQUET \"{bouquet}\" ORDER BY bouquet")
+							if not mutableBouquetList.addService(newBouquetReference):
+								mutableBouquetList.flushChanges()
+								dvbDB.reloadBouquets()
+								mutableBouquet = serviceHandler.list(newBouquetReference).startEdit()
+								if mutableBouquet:
+									mutableBouquet.setListName(f"Pluto TV {region} (TV)")
+									mutableBouquet.flushChanges()
+								else:
+									print("[PlutoTV] Error: Get mutable list for newly created bouquet failed!")
+					dvbDB.reloadServicelist()
+					dvbDB.reloadBouquets()
+					print(f"[PlutoTV] Merge EPG for region '{PLUTO_DATA[region][PLUTO_COUNTRY_NAME]}'.")
+					eventCount = 0
+					for channel, serviceReference in serviceReferences.items():
+						for genre in guideList.get(channel, []):
+							eventCount += len(genre)
+							epgCache.importEvents(serviceReference, genre)
+					print(f"[PlutoTV] {eventCount} events merged, for {channelCount} channels.")
+					self.uiUpdate(progress=100)
+				else:
+					print(f"[PlutoTV] Pluto TV may not be available in '{PLUTO_DATA[region][PLUTO_COUNTRY_NAME]}'.")
+					self.uiUpdate(status=_("Pluto TV may not be available in '%s'.") % PLUTO_DATA[region][PLUTO_COUNTRY_NAME], pause=10)
+					continue
+				categories.clear()
+				channelList.clear()
+				guideList.clear()
+			if not self.abort and serviceNumbersModified:
+				print("[PlutoTV] Saving service numbers.")
+				try:
+					with open(PLUTO_SERVICE_NUMBER_PATH, "wb") as fd:
+						dump(serviceNumbers, fd, protocol=5)
+						serviceNumbersModified = False
+				except OSError as err:
+					print(f"[PlutoTV] Error {err.errno}: Unable to save service numbers to '{PLUTO_SERVICE_NUMBER_PATH}'!  ({err.strerror})")
+			serviceNumbers.clear()
+			fileWriteLine(PLUTO_TIMER_PATH, f"{int(time())}\n", source=MODULE_NAME)
+		except Exception as err:
+			print(f"[PlutoTV] Error: Update of '{PLUTO_DATA[region][PLUTO_COUNTRY_NAME]}' has failed and been aborted!  ({err})\n{format_exc()}")
+			result = self.EXIT_ERROR
+		if not self.verbose:
+			self.start()  # This is a background update, reset the timer for the next run.
+		self.updateActive = False
+		print("[PlutoTV] Carousel update finished.")
+		if self.abort:
+			result = self.EXIT_ABORT
+		return result
 
 
-def Download_PlutoTV(session, **kwargs):
-	session.open(PlutoDownload.PlutoDownload)
+def updateQuery(url, queryData, safe="", quote_via=quote_plus):
+	parsed = urlparse(url)
+	query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+	for key, value in queryData.items():  # Update the URL query with the supplied queryData.
+		if value:
+			query[key] = value
+	queryList = []
+	for key in query.keys():  # Reconstruct the query string.
+		queryList.append(f"{key}={query[key]}")
+	query = quote_via("&".join(queryList), safe=f"=&{safe}")
+	return parsed._replace(query=query).geturl()
 
 
-def system(session, **kwargs):
-	def restartPlutoTV(restart=False):
-		if restart:
-			session.openWithCallback(restartPlutoTV, PlutoTV)
+def buildHeader(ipAddress):
+	header = {
+		"Accept": "application/json, text/javascript, */*; q=0.01",
+		"Host": "api.pluto.tv",
+		"Connection": "keep-alive",
+		"Referer": "http://pluto.tv/",
+		"Origin": "http://pluto.tv"
+	} | PLUTO_USER_AGENT
+	if ipAddress:
+		header["X-Forwarded-For"] = ipAddress
+	return header
 
-	session.openWithCallback(restartPlutoTV, PlutoTV)
+
+def fetchURL(url, param={}, header=PLUTO_USER_AGENT):
+	try:
+		response = get(url, param, headers=header)
+		response.raise_for_status()
+		result = response.json()
+	except Exception as err:
+		print(f"[PlutoTV] fetchURL Error: {err}!\n{format_exc()}")
+		result = {}
+	return result
+
+
+# The following dump methods, and their support methods, are only needed for debugging and should be commented out for production.
+#
+"""
+def carouselDump(region, carousel):
+	data = []
+	fileWriteLine(f"/tmp/PlutoTV_{region}_Carousel_raw.txt", carousel, source=MODULE_NAME)
+	checkKeys(data, "Carousel", carousel, ("offset", "page", "totalCategories", "totalPages", "categories"))
+	appendValue(data, "Offset", carousel, "offset")
+	appendValue(data, "Page", carousel, "page")
+	appendValue(data, "Total categories", carousel, "totalCategories")
+	appendValue(data, "Total pages", carousel, "totalPages")
+	for index1, category in enumerate(carousel.get("categories"), start=1):
+		checkKeys(data, "Category", category, ("_id", "name", "plutoOfficeOnly", "kidsMode", "page", "offset", "totalItemsCount", "mainCategories", "items", "hero_carousel"))
+		appendValue(data, "  Identifier", category, "_id")
+		appendValue(data, "  Name", category, "name")
+		appendValue(data, "  Pluto office only", category, "plutoOfficeOnly")
+		appendValue(data, "  Kids mode", category, "kidsMode")
+		appendValue(data, "  Page", category, "page")
+		appendValue(data, "  Offset", category, "offset")
+		appendValue(data, "  Total items", category, "totalItemsCount")
+		appendValue(data, "  Hero carousel", category, "hero_carousel")
+		for main in category.get("mainCategories"):
+			checkKeys(data, "Main category", main, ("categoryID",))
+			appendValue(data, "  Category ID", main, "categoryID")
+		for index2, item in enumerate(category.get("items", []), start=1):
+			data.append(f"  Item {index2}:")
+			checkKeys(data, "Items", item, ("_id", "slug", "seriesID", "name", "summary", "description", "duration", "originalContentDuration", "allotment", "featuredImage", "rating", "genre", "type", "seasonsNumbers", "stitched", "covers", "kidsMode", "ratingDescriptors", "poweredByViaFree", "poster16_9", "clip", "entitlements", "avail", "ad", "cc"))
+			appendValue(data, "    Identifier", item, "_id")
+			appendValue(data, "    Slug", item, "slug")
+			appendValue(data, "    Series ID", item, "seriesID")
+			appendValue(data, "    Name", item, "name")
+			appendValue(data, "    Summary", item, "summary")
+			appendValue(data, "    Description", item, "description")
+			appendValue(data, "    Duration", item, "duration")
+			appendValue(data, "    Original duration", item, "originalContentDuration")
+			appendValue(data, "    Allotment", item, "allotment")
+			appendValue(data, "    Featured image", item, "featuredImage", subKeys=("path",))
+			appendValue(data, "    Rating", item, "rating")
+			appendValue(data, "    Genre", item, "genre")
+			appendValue(data, "    Type", item, "type")
+			appendValue(data, "    Season numbers", item, "seasonsNumbers")
+			appendValue(data, "    Original duration", item, "originalContentDuration")
+			appendValue(data, "    Stitched", item, "stitched", subKeys=("urls", "sessionURL"))
+			for cover in item.get("covers"):
+				checkKeys(data, "Covers", cover, ("aspectRatio", "url"))
+				appendValue(data, "    Cover aspect ratio", cover, "aspectRatio")
+				appendValue(data, "    Cover URL", cover, "url")
+			appendValue(data, "    Kids mode", item, "kidsMode")
+			appendValue(data, "    Rating descriptors", item, "ratingDescriptors")
+			appendValue(data, "    Powered by Via Free", item, "poweredByViaFree")
+			appendValue(data, "    Poster 16x9", item, "poster16_9", subKeys=("path",))
+			appendValue(data, "    Clip", item, "clip", subKeys=("actors", "writers", "directors", "producers", "originalReleaseDate"))
+			appendValue(data, "    Entitlements", item, "entitlements")
+			checkKeys(data, "Avail", item["avail"], ("startDate",))
+			appendValue(data, "    Avail", item, "avail", subKeys=("startDate",))
+			appendValue(data, "    Ad", item, "ad")
+			appendValue(data, "    Closed captions", item, "cc")
+	fileWriteLines(f"/tmp/PlutoTV_{region}_Carousel_dump.txt", data, source=MODULE_NAME)
+
+
+def seriesDump(region, series):
+	data = []
+	fileWriteLine(f"/tmp/PlutoTV_{region}_Series_raw.txt", series, source=MODULE_NAME)
+	checkKeys(data, "Series", series, ("_id", "name", "summary", "description", "slug", "type", "rating", "featuredImage", "genre", "offset", "page", "seasons", "covers", "poster16_9", "avail"))
+	appendValue(data, "Identifier", series, "_id")
+	appendValue(data, "Name", series, "name")
+	appendValue(data, "Summary", series, "summary")
+	appendValue(data, "Description", series, "description")
+	appendValue(data, "Slug", series, "slug")
+	appendValue(data, "Type", series, "type")
+	appendValue(data, "Rating", series, "rating")
+	appendValue(data, "Featured image", series, "featuredImage", subKeys=("path",))
+	appendValue(data, "Genre", series, "genre")
+	appendValue(data, "Offset", series, "offset")
+	appendValue(data, "Page", series, "page")
+	for cover in series.get("covers"):
+		checkKeys(data, "Covers", cover, ("aspectRatio", "url"))
+		appendValue(data, "Cover aspect ratio", cover, "aspectRatio")
+		appendValue(data, "Cover URL", cover, "url")
+	appendValue(data, "Poster 16x9", series, "poster16_9", subKeys=("path",))
+	checkKeys(data, "Avail", series["avail"], ("startDate",))
+	appendValue(data, "Avail", series, "avail", subKeys=("startDate",))
+	for season in series.get("seasons", []):
+		checkKeys(data, "Season", season, ("number", "episodes"))
+		appendValue(data, "  Number", season, "number")
+		for episode in (season.get("episodes", [])):
+			data.append(f"  Season {episode["season"]}, Episode {episode["number"]}")
+			checkKeys(data, "Episode", episode, ("_id", "name", "description", "allotment", "rating", "slug", "duration", "originalContentDuration", "genre", "type", "number", "season", "stitched", "covers", "poster16_9", "clip", "cc"))
+			appendValue(data, "    Identifier", episode, "_id")
+			appendValue(data, "    Name", episode, "name")
+			appendValue(data, "    Description", episode, "description")
+			appendValue(data, "    Allotment", episode, "allotment")
+			appendValue(data, "    Rating", episode, "rating")
+			appendValue(data, "    Slug", episode, "slug")
+			appendValue(data, "    Duration", episode, "duration")
+			appendValue(data, "    Original duration", episode, "originalContentDuration")
+			appendValue(data, "    Genre", episode, "genre")
+			appendValue(data, "    Type", episode, "type")
+			appendValue(data, "    Number", episode, "number")
+			appendValue(data, "    Season", episode, "season")
+			appendValue(data, "    Stitched", episode, "stitched", subKeys=("urls", "sessionURL"))
+			for cover in episode.get("covers"):
+				checkKeys(data, "Covers", cover, ("aspectRatio", "url"))
+				appendValue(data, "    Cover aspect ratio", cover, "aspectRatio")
+				appendValue(data, "    Cover URL", cover, "url")
+			appendValue(data, "    Poster 16x9", episode, "poster16_9", subKeys=("path",))
+			appendValue(data, "    Clip", episode, "clip", subKeys=("actors", "writers", "directors", "producers", "originalReleaseDate"))
+			appendValue(data, "    Closed captions", episode, "cc")
+	fileWriteLines(f"/tmp/PlutoTV_{region}_Series_dump.txt", data, source=MODULE_NAME)
+
+
+def channelsDump(region, channels):
+	data = []
+	fileWriteLine(f"/tmp/PlutoTV_{region}_Channels_raw.txt", channels, source=MODULE_NAME)
+	for index, channel in enumerate(channels, start=1):
+		checkKeys(data, "Channel", channel, ("_id", "slug", "name", "hash", "number", "summary", "visibility", "onDemandDescription", "category", "plutoOfficeOnly", "directOnly", "chatRoomId", "onDemand", "cohortMask", "featuredImage", "thumbnail", "tile", "tileGrayScale", "logo", "colorLogoSVG", "colorLogoPNG", "solidLogoSVG", "solidLogoPNG", "featured", "featuredOrder", "favorite", "isStitched", "stitched", "tmsid"))
+		data.append(f"Channel {index}:")
+		appendValue(data, "  Identifier", channel, "_id")
+		appendValue(data, "  Slug", channel, "slug")
+		appendValue(data, "  Name", channel, "name")
+		appendValue(data, "  Hash", channel, "hash")
+		appendValue(data, "  Number", channel, "number")
+		appendValue(data, "  Summary", channel, "summary")
+		appendValue(data, "  Visibility", channel, "visibility")
+		appendValue(data, "  On-demand description", channel, "onDemandDescription")
+		appendValue(data, "  Category", channel, "category")
+		appendValue(data, "  PlutoTV office only", channel, "plutoOfficeOnly")
+		appendValue(data, "  Direct only", channel, "directOnly")
+		appendValue(data, "  Chat room ID", channel, "chatRoomId")
+		appendValue(data, "  On-demand", channel, "onDemand")
+		appendValue(data, "  Cohort mask", channel, "cohortMask")
+		appendValue(data, "  Featured image", channel, "featuredImage", subKeys=("path",))
+		appendValue(data, "  Thumbnail", channel, "thumbnail", subKeys=("path",))
+		appendValue(data, "  Tile", channel, "tile", subKeys=("path",))
+		appendValue(data, "  Tile gray scale", channel, "tileGrayScale", subKeys=("path",))
+		appendValue(data, "  Logo", channel, "logo", subKeys=("path",))
+		appendValue(data, "  Color logo SVG", channel, "colorLogoSVG", subKeys=("path",))
+		appendValue(data, "  Color logo PNG", channel, "colorLogoPNG", subKeys=("path",))
+		appendValue(data, "  Solid logo SVG", channel, "solidLogoSVG", subKeys=("path",))
+		appendValue(data, "  Solid logo PNG", channel, "solidLogoPNG", subKeys=("path",))
+		appendValue(data, "  Featured", channel, "featured")
+		appendValue(data, "  Featured order", channel, "featuredOrder")
+		appendValue(data, "  Favorite", channel, "favorite")
+		appendValue(data, "  Is stitched", channel, "isStitched")
+		appendValue(data, "  Stitched", channel, "stitched", subKeys=("urls", "sessionURL"))
+		appendValue(data, "  TMS ID", channel, "tmsid")
+	fileWriteLines(f"/tmp/PlutoTV_{region}_Channels_dump.txt", data, source=MODULE_NAME)
+
+
+def guidesDump(region, guides):
+	data = []
+	fileWriteLine(f"/tmp/PlutoTV_{region}_Guide_raw.txt", guides, source=MODULE_NAME)
+	for index, guide in enumerate(guides, start=1):
+		checkKeys(data, "Guide", guide, ("_id", "slug", "name", "hash", "number", "summary", "visibility", "onDemandDescription", "category", "plutoOfficeOnly", "directOnly", "chatRoomId", "onDemand", "cohortMask", "featuredImage", "thumbnail", "tile", "tileGrayScale", "logo", "colorLogoSVG", "colorLogoPNG", "solidLogoSVG", "solidLogoPNG", "featured", "featuredOrder", "favorite", "isStitched", "stitched", "timelines"))
+		data.append(f"Guide {index}:")
+		appendValue(data, "  Identifier", guide, "_id")
+		appendValue(data, "  Slug", guide, "slug")
+		appendValue(data, "  Name", guide, "name")
+		appendValue(data, "  Hash", guide, "hash")
+		appendValue(data, "  Number", guide, "number")
+		appendValue(data, "  Summary", guide, "summary")
+		appendValue(data, "  Visibility", guide, "visibility")
+		appendValue(data, "  On-demand description", guide, "onDemandDescription")
+		appendValue(data, "  Category", guide, "category")
+		appendValue(data, "  PlutoTV office only", guide, "plutoOfficeOnly")
+		appendValue(data, "  Direct only", guide, "directOnly")
+		appendValue(data, "  Chat room ID", guide, "chatRoomId")
+		appendValue(data, "  On-demand", guide, "onDemand")
+		appendValue(data, "  Cohort mask", guide, "cohortMask")
+		appendValue(data, "  Featured image", guide, "featuredImage", subKeys=("path",))
+		appendValue(data, "  Thumbnail", guide, "thumbnail", subKeys=("path",))
+		appendValue(data, "  Tile", guide, "tile", subKeys=("path",))
+		appendValue(data, "  Tile gray scale", guide, "tileGrayScale", subKeys=("path",))
+		appendValue(data, "  Logo", guide, "logo", subKeys=("path",))
+		appendValue(data, "  Color logo SVG", guide, "colorLogoSVG", subKeys=("path",))
+		appendValue(data, "  Color logo PNG", guide, "colorLogoPNG", subKeys=("path",))
+		appendValue(data, "  Solid logo SVG", guide, "solidLogoSVG", subKeys=("path",))
+		appendValue(data, "  Solid logo PNG", guide, "solidLogoPNG", subKeys=("path",))
+		appendValue(data, "  Featured", guide, "featured")
+		appendValue(data, "  Featured order", guide, "featuredOrder")
+		appendValue(data, "  Favorite", guide, "favorite")
+		appendValue(data, "  Is stitched", guide, "isStitched")
+		appendValue(data, "  Stitched", guide, "stitched", subKeys=("urls", "sessionURL"))
+		# appendValue(data, "  Time lines", guide, "timelines")
+		for timeline in guide.get("timelines"):
+			data.append("  Timeline data:")
+			checkKeys(data, "Timeline", timeline, ("_id", "start", "stop", "title", "episode"))
+			appendValue(data, "    Identifier", timeline, "_id")
+			appendValue(data, "    Start", timeline, "start")
+			appendValue(data, "    Stop", timeline, "stop")
+			appendValue(data, "    Title", timeline, "title")
+			# appendValue(data, "    Episode", timeline, "episode")  # This is broken down below.
+			episode = timeline.get("episode")
+			checkKeys(data, "Episode", episode, ("_id", "number", "season", "description", "duration", "originalContentDuration", "genre", "subGenre", "distributeAs", "clip", "rating", "name", "slug", "poster", "firstAired", "thumbnail", "liveBroadcast", "featuredImage", "series", "ratingDescriptors", "poster16_9", "cc"))
+			data.append("    Episode data:")
+			appendValue(data, "      Identifier", episode, "_id")
+			appendValue(data, "      Number", episode, "number")
+			appendValue(data, "      Season", episode, "season")
+			appendValue(data, "      Description", episode, "description")
+			appendValue(data, "      Original content duration", episode, "originalContentDuration")
+			appendValue(data, "      Genre", episode, "genre")
+			appendValue(data, "      Sub-genre", episode, "subGenre")
+			appendValue(data, "      Distribute as", episode, "distributeAs", subKeys=("AVOD",))
+			appendValue(data, "      Clip", episode, "clip", subKeys=("actors", "writers", "directors", "producers", "originalReleaseDate"))
+			appendValue(data, "      Rating", episode, "rating")
+			appendValue(data, "      Name", episode, "name")
+			appendValue(data, "      Slug", episode, "slug")
+			appendValue(data, "      Poster", episode, "poster", subKeys=("path",))
+			appendValue(data, "      First aired", episode, "firstAired")
+			appendValue(data, "      Thumbnail", episode, "thumbnail", subKeys=("path",))
+			appendValue(data, "      Live broadcast", episode, "liveBroadcast")
+			appendValue(data, "      Featured image", episode, "featuredImage", subKeys=("path",))
+			# appendValue(data, "      Series", episode, "series")  # This is broken down below.
+			appendValue(data, "      Rating descriptors", episode, "ratingDescriptors")
+			appendValue(data, "      Poster 16x9", episode, "poster16_9", subKeys=("path",))
+			appendValue(data, "      Closed captions", episode, "cc")
+			series = episode.get("series")
+			checkKeys(data, "Series", series, ("_id", "name", "slug", "type", "tile", "description", "summary", "displayName", "featuredImage", "poster16_9"))
+			data.append("      Series data:")
+			appendValue(data, "        Identifier", series, "_id")
+			appendValue(data, "        Name", series, "name")
+			appendValue(data, "        Slug", series, "slug")
+			appendValue(data, "        Type", series, "type")
+			appendValue(data, "        Tile", series, "tile", subKeys=("path",))
+			appendValue(data, "        Description", series, "description")
+			appendValue(data, "        Summary", series, "summary")
+			appendValue(data, "        Display name", series, "displayName")
+			appendValue(data, "        Featured image", series, "featuredImage", subKeys=("path",))
+			appendValue(data, "        poster16_9", series, "poster16_9", subKeys=("path",))
+			appendValue(data, "        Tile", series, "tile", subKeys=("path",))
+			appendValue(data, "        Poster 16x9", series, "poster16_9", subKeys=("path",))
+	fileWriteLines(f"/tmp/PlutoTV_{region}_Guide_dump.txt", data, source=MODULE_NAME)
+
+
+def checkKeys(data, label, source, keys):
+	keyList = list(source.keys())
+	for key in keys:
+		if key in keyList:
+			keyList.remove(key)
+	if keyList:
+		data.append(f"**{label} Unaccounted key(s)={keyList}")
+
+
+def appendValue(data, label, source, key, subKeys=None):
+	value = source.get(key)
+	match value:
+		case bool() | float() | int():
+			if value is not None and not (key == "originalContentDuration" and value == 0):  # "originalContentDuration" always defined, even if 0.
+				data.append(f"{label}={value}")
+		case dict():
+			if subKeys:
+				keys = list(source.get(key).keys())
+				for subKey in subKeys:
+					if subKey in keys:
+						keys.remove(subKey)
+				if keys:
+					data.append(f"**{label} keys={keys}")
+				for subKey in subKeys:
+					if subKey in value:
+						data.append(f"{label} {subKey}={value[subKey]}")
+			elif value:
+				data.append(f"{label}={value}")
+		case list() | str():
+			if value:
+				data.append(f"{label}={value}")
+		case None:
+			# data.append(f"{label}=** Value undefined! **")
+			pass
+		case _:
+			data.append(f"**{type(value)}**{label}={value}")
+"""
+#
+# End of diagnostic dump methods.
+
+
+# class PlutoResumePoints:
+# 	def __init__(self):
+# 		self.resumePointsCache = {}
+resumePointsCache = {}
+
+
+def getResumePoint(sid):
+	def loadResumePoints(sid):
+		resumePoints = {}
+		path = join(PLUTO_FOLDER, f"{sid}.cue")
+		if isfile(path):
+			try:
+				with open(path, "rb") as fd:
+					resumePoints = load(fd)
+			except OSError as err:
+				print(f"[PlutoTV] Error {err.errno}: Failed to open resume point file '{path}'!  ({err.strerror})")
+			except Exception as err:
+				print(f"[PlutoTV] Error: Failed to load resume point data!  ({str(err)})")
+		return resumePoints
+
+	resumePoint = [None, None, None]  # The resumePoint is (lruTimestamp, position, length).
+	if sid is not None:
+		# self.resumePointsCache = self.loadResumePoints(sid)
+		# resumePoint = self.resumePointsCache.get(sid, resumePoint)
+		global resumePointsCache
+		resumePointsCache = loadResumePoints(sid)
+		resumePoint = resumePointsCache.get(sid, resumePoint)
+		resumePoint[0] = int(time())  # Update lruTimestamp.
+	return resumePoint[1], resumePoint[2]
+
+
+def setResumePoint(session, sid=None):
+	def saveResumePoints(sid):
+		path = join(PLUTO_FOLDER, f"{sid}.cue")
+		try:
+			with open(path, "wb") as fd:
+				# dump(self.resumePointsCache, fd, protocol=5)
+				global resumePointsCache
+				dump(resumePointsCache, fd, protocol=5)
+		except OSError as err:
+			print(f"[PlutoTV] Error {err.errno}: Failed to write resume point file '{path}'!  ({err.strerror})")
+		except Exception as err:
+			print(f"[PlutoTV] Error: Failed to dump resume point data!  ({str(err)})")
+
+	service = session.nav.getCurrentService()
+	serviceReference = session.nav.getCurrentlyPlayingServiceReference()
+	if service and serviceReference:
+		seek = service.seek()
+		if seek:
+			position = seek.getPlayPosition()
+			if not position[0]:
+				length = seek.getLength()
+				length = length[1] if length else None
+				# self.resumePointsCache[sid] = [int(time()), position[1], length]
+				# self.saveResumePoints(sid)
+				global resumePointsCache
+				resumePointsCache[sid] = [int(time()), position[1], length]
+				saveResumePoints(sid)
+
+
+class PlutoUpdate(Screen, PlutoUpdater):
+	# skin = """
+	# <screen name="PlutoUpdate" title="Pluto TV Update" position="center,50" size="600,105" ignoreWidgets="action" resolution="1280,720">
+	# 	<widget name="progress" position="0,4" size="e-70,12" backgroundColor="#00333333" borderColor="#0000C000" borderWidth="1" foregroundColor="#0000C000" />
+	# 	<widget name="percentage" position="e-70,0" size="70,20" font="Regular;20" horizontalAlignment="right" transparent="1" verticalAlignment="center" />
+	# 	<widget name="status" position="0,30" size="e,25" font="Regular;20" noWrap="1" transparent="1" verticalAlignment="center" />
+	# 	<widget source="key_red" render="Label" position="0,e-40" size="180,40" backgroundColor="key_red" conditional="key_red" font="Regular;20" foregroundColor="key_text" horizontalAlignment="center" verticalAlignment="center">
+	# 		<convert type="ConditionalShowHide" />
+	# 	</widget>
+	# 	<widget source="key_help" render="Label" position="e-80,e-40" size="80,40" backgroundColor="key_back" conditional="key_help" font="Regular;20" foregroundColor="key_text" horizontalAlignment="center" verticalAlignment="center">
+	# 		<convert type="ConditionalShowHide" />
+	# 	</widget>
+	# </screen>"""
+
+	skin = """
+	<screen name="PlutoUpdate" title="Pluto TV Update" position="center,50" size="620,100" flags="wfNoBorder" ignoreWidgets="key_red,key_help" resolution="1280,720">
+		<widget name="action" position="10,10" size="e-20,25" font="Regular;20" noWrap="1" transparent="1" verticalAlignment="center" />
+		<widget name="progress" position="10,39" size="e-90,12" backgroundColor="#00333333" borderColor="#0000C000" borderWidth="1" foregroundColor="#0000C000" />
+		<widget name="percentage" position="e-90,35" size="70,20" font="Regular;20" horizontalAlignment="right" transparent="1" verticalAlignment="center" />
+		<widget name="status" position="10,65" size="e,25" font="Regular;20" noWrap="1" transparent="1" verticalAlignment="center" />
+	</screen>"""
+
+	def __init__(self, session, bouquetRegionList=None):
+		Screen.__init__(self, session, enableHelp=True)
+		PlutoUpdater.__init__(self, True)  # Verbose output is True.
+		self.bouquetRegionList = bouquetRegionList
+		self["action"] = Label(_("Pluto TV Update"))
+		self["progress"] = ProgressBar()
+		self["progress"].setValue(0)
+		self["percentage"] = Label("0%")
+		self["status"] = Label(_("Please wait..."))
+		self["key_red"] = StaticText(_("Cancel"))
+		self["actions"] = HelpableActionMap(self, ["CancelActions"], {
+			"cancel": (self.keyCancel, _("Cancel Pluto TV update"))
+		}, prio=0, description=_("Pluto TV Update Action"))
+		self.timer = eTimer()
+		self.timer.callback.append(self.close)
+		self.onLayoutFinish.append(self.startUpdate)
+
+	def startUpdate(self):
+		def getResult(result):
+			# print(f"[PlutoTV] DEBUG: Update thread returned result {result}.")
+			self["key_red"].setText(_("Close"))
+			match result:
+				case PlutoUpdater.EXIT_DONE:
+					self.setTitle(_("Pluto TV"))
+					self["action"].setText(_("Pluto TV Update"))
+					self["status"].setText(_("Update finished."))
+					delay = 5
+				case PlutoUpdater.EXIT_RUNNING:
+					self.setTitle(_("Pluto TV"))
+					self["action"].setText(_("Pluto TV Update"))
+					self["status"].setText(_("Update already in progress!"))
+					delay = 10
+				case PlutoUpdater.EXIT_ABORT:
+					self["status"].setText(_("Update aborted!"))
+					delay = 5
+				case PlutoUpdater.EXIT_ERROR:
+					self["status"].setText(_("Error during update, update aborted!"))
+					delay = 10
+				case _:
+					delay = 0
+			if delay:
+				self.timer.startLongTimer(delay)
+
+		thread = threads.deferToThread(self.updateThread)
+		thread.addCallback(getResult)
+
+	def keyCancel(self):
+		self.abort = True
+
+
+class PlutoScheduler(PlutoUpdater):
+	def __init__(self):
+		PlutoUpdater.__init__(self, False)  # Verbose output is False.
+		self.timer = eTimer()
+		self.timer.callback.append(self.startUpdate)
+
+	def start(self):
+		repeat = config.plugins.PlutoTV.updateTimer.value
+		last = int(fileReadLine(PLUTO_TIMER_PATH, default="0", source=MODULE_NAME))
+		delay = (repeat * 3600) - (int(time()) - last)
+		if delay <= 0 or delay > (repeat * 3600):
+			delay = 1
+		print(f"[PlutoTV] Next update in {delay // 3600}:{delay // 60 % 60:02d}:{delay % 60:02d} at {strftime("%Y-%b-%d %H:%M:%S", localtime(int(time()) + delay))}. Update will {f"be run every {repeat} hour(s)" if repeat else "not be rescheduled"}.")
+		self.timer.startLongTimer(delay)
+
+	def stop(self):
+		self.timer.stop()
+		print("[PlutoTV] Update process stopped.")
+
+	def startUpdate(self):
+		print("[PlutoTV] Update process starting.")
+		reactor.callInThread(self.updateThread)
+
+
+def runUpdate(session, **kwargs):
+	session.open(PlutoUpdate)
+
+
+def runFromMainMenu(menuid, **kwargs):
+	return [(_("Pluto TV"), runPlutoTV, "plutotv", 20)] if menuid == "mainmenu" else []
+
+
+def runPlutoTV(session, **kwargs):
+	session.open(PlutoTV)
+
+
+def autoStart(reason, session):
+	def findStoragePath(minFree, default, *candidates):
+		mounts = fileReadLines("/proc/mounts", [], source=MODULE_NAME)
+		mountPoints = [x.split(" ", 2)[1] for x in mounts]
+		result = default
+		for candidate in candidates:
+			if candidate.encode("UTF-8") in mountPoints:
+				try:
+					diskStatus = statvfs(candidate)
+					freeSpace = diskStatus.f_bavail * diskStatus.f_frsize
+					if freeSpace > minFree and freeSpace > 100 * 10 ** 6:
+						print(f"[PlutoTV] Free space on selected mount {candidate} is {freeSpace}.")
+						result = candidate
+						break
+					else:
+						print(f"[PlutoTV] Free space on candidate mount {candidate} is {freeSpace} and insufficiet.")
+				except OSError as err:
+					print(f"[PlutoTV] Error {err.errno}: Failed to get filesystem status for '{candidate}'!  ({err.strerror})")
+		return result
+
+	if reason == 0:  # Starting Enigma2.
+		global PLUTO_FOLDER
+		PLUTO_FOLDER = join(findStoragePath(500 * 10 ** 6, "/tmp", "/media/hdd", "/media/usb", "/media/cf", "/media/mmc"), "PlutoTV")
+		if not exists(PLUTO_FOLDER):
+			makedirs(PLUTO_FOLDER)
+		plutoScheduler.start()
+	else:  # Stopping Enigma2:
+		plutoScheduler.stop()
 
 
 def Plugins(**kwargs):
-	_list = [
-		PluginDescriptor(
-			name=_("PlutoTV"),
-			where=[PluginDescriptor.WHERE_PLUGINMENU, PluginDescriptor.WHERE_EXTENSIONSMENU],
-			icon="plutotv.png",
-			description=_("Plugin to play videos and to create a PlutoTV channel list"),
-			fnc=system,
-		),
-		PluginDescriptor(
-			name=_("Download PlutoTV Bouquet, picons & EPG"), where=PluginDescriptor.WHERE_EXTENSIONSMENU, fnc=Download_PlutoTV
-		),
-		PluginDescriptor(name=_("Silent Download PlutoTV"), where=PluginDescriptor.WHERE_SESSIONSTART, fnc=autostart),
+	name = _("Pluto TV")
+	description = _("Play Pluto TV videos and create Pluto TV bouquets.  (Version: %s)") % __version__
+	plugin = [
+		PluginDescriptor(name=_("Pluto TV Scheduler"), where=[PluginDescriptor.WHERE_SESSIONSTART], fnc=autoStart),
+		PluginDescriptor(name=name, description=description, where=[PluginDescriptor.WHERE_PLUGINMENU], icon="plutotv.png", fnc=runPlutoTV),
 	]
-	return _list
+	if config.plugins.PlutoTV.addToMainMenu.value:
+		# plugin.append(PluginDescriptor(name=name, description=description, where=[PluginDescriptor.WHERE_MAINMENU], icon="plutotv.png", fnc=runPlutoTV))
+		plugin.append(PluginDescriptor(name=name, description=description, where=[PluginDescriptor.WHERE_MENU], icon="plutotv.png", fnc=runFromMainMenu))
+	if config.plugins.PlutoTV.addToExtensionMenu.value:
+		plugin.append(PluginDescriptor(name=name, description=description, where=[PluginDescriptor.WHERE_EXTENSIONSMENU], icon="plutotv.png", fnc=runPlutoTV))
+	if config.plugins.PlutoTV.addUpdateToExtensionMenu.value:
+		plugin.append(PluginDescriptor(name=_("Pluto TV Update"), description=_("Start Pluto TV bouquet, picons & EPG update."), where=[PluginDescriptor.WHERE_EXTENSIONSMENU], fnc=runUpdate))
+	return plugin
+
+
+plutoScheduler = PlutoScheduler()

@@ -1,7 +1,8 @@
 [tool.ruff]
-line-length = 120
+builtins = ["_", "ngettext"]
+line-length = 1000
 select = ["E","F","W"]
-ignore = ["W191","E402","E501","E722","E741","F401","F403","F405","F841"]
+ignore = ["W191"]
 
 [tool.isort]
 profile = "black"

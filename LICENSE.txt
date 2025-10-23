@@ -1,7 +1,10 @@
-
    Copyright (C) 2021 Team OpenSPA
    https://openspa.info/
- 
+
+   Copyright (c) 2021-2024 Billy2011 @ vuplus-support.org
+
+   Copyright (c) 2025 jbleyel, IanSav
+
    SPDX-License-Identifier: GPL-2.0-or-later
    See LICENSES/README.md for more information.
  
@@ -17,5 +20,3 @@
 
    You should have received a copy of the GNU General Public License
    along with PlutoTV.  If not, see <http://www.gnu.org/licenses/>.
-
-

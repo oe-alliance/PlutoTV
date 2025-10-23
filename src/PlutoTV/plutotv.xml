@@ -1,0 +1,34 @@
+<regionxml>
+	<region country="AR" name="Argentina" ip="104.103.238.0" tids="10B" />
+	<region country="AT" name="Austria" ip="2.18.68.0" tids="108" />
+	<region country="AU" name="Australia" ip="144.48.37.140" tids="11E" />
+	<region country="BO" name="Bolivia" ip="186.27.64.0" tids="111" />
+	<region country="BR" name="Brazil" ip="177.47.27.205" tids="100" />
+	<region country="CA" name="Canada" ip="192.206.151.131" tids="101" />
+	<region country="CH" name="Switzerland" ip="5.144.31.245" tids="109" />
+	<region country="CL" name="Chile" ip="161.238.0.0" tids="110" />
+	<region country="CO" name="Colombia" ip="181.204.4.74" tids="10C" />
+	<region country="CR" name="Costa Rica" ip="138.122.24.0" tids="10D" />
+	<region country="DE" name="Germany" ip="85.214.132.117" tids="102" />
+	<region country="DK" name="Denmark" ip="80.63.84.58" tids="11C" />
+	<region country="DO" name="Dominican Republic" ip="152.166.0.0" tids="11A" />
+	<region country="EC" name="Ecuador" ip="181.196.0.0" tids="118" />
+	<region country="ES" name="Spain" ip="88.26.241.248" tids="103" />
+	<region country="FI" name="Finland" ip="85.194.236.0" tids="11F" />
+	<region country="FR" name="France" ip="176.31.84.249" tids="104" />
+	<region country="GB" name="United Kingdom" ip="185.199.220.58" tids="106" /><!-- 185.86.151.11 -->
+	<region country="GT" name="Guatemala" ip="190.115.2.25" tids="113" />
+	<region country="HN" name="Honduras" ip="181.115.0.0" tids="114" />
+	<region country="IT" name="Italy" ip="5.133.48.0" tids="10A" />
+	<region country="MX" name="Mexico" ip="200.68.128.83" tids="105" />
+	<region country="NI" name="Nicaragua" ip="186.76.0.0" tids="115" />
+	<region country="NO" name="Norway" ip="84.214.150.146" tids="11D" />
+	<region country="PA" name="Panama" ip="168.77.0.0" tids="116" />
+	<region country="PE" name="Peru" ip="190.42.0.0" tids="10E" />
+	<region country="PY" name="Paraguay" ip="177.250.0.0" tids="119" />
+	<region country="SE" name="Sweden" ip="185.39.146.168" tids="11B" />
+	<region country="SV" name="El Salvador" ip="190.53.128.0" tids="112" />
+	<region country="US" name="United States" ip="185.236.200.172" tids="107" />
+	<region country="UY" name="Uruguay" ip="179.24.0.0" tids="117" />
+	<region country="VE" name="Venezuela" ip="103.83.193.0" tids="10F" />
+</regionxml>

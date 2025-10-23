@@ -1,0 +1,21 @@
+<setupxml>
+	<setup key="PlutoTV" title="Pluto TV Settings" skin="PlutoTVSettings">
+		<item level="0" text="Video region" description="Select the region from which the Pluto TV services will be loaded.">config.plugins.PlutoTV.region</item>
+		<item level="0" text="Add to Main Menu" description="Select 'Yes' to add Pluto TV to the Main Menu.">config.plugins.PlutoTV.addToMainMenu</item>
+		<item level="0" text="Add to Extensions Menu" description="Select 'Yes' to add Pluto TV to the Extensions Menu.">config.plugins.PlutoTV.addToExtensionMenu</item>
+		<item level="0" text="Add update to Extensions Menu" description="Select 'Yes' to add the Pluto TV update function to the Extensions Menu.">config.plugins.PlutoTV.addUpdateToExtensionMenu</item>
+		<item level="0" text="Confirm close" description="Select 'Yes' to display a pop up screen to confirm the close request.">config.plugins.PlutoTV.confirmClose</item>
+		<item level="0" text="Picon directory" description="Enter the directory where the Pluto TV picons will be saved. This should be the same location where other picons are located." restart="gui">config.plugins.PlutoTV.piconPath</item>
+		<item level="0" text="Start PlutoTV in silent mode" description="Select 'Yes' to display the initial data loading information.">config.plugins.PlutoTV.silentMode</item>
+		<item level="0" text="Picon mode" description="Select the operating picon mode.">config.plugins.PlutoTV.piconMode</item>
+		<item level="0" text="Time between automatic updates" description="Select the delay between automatic updates of the Pluto TV carousel.">config.plugins.PlutoTV.updateTimer</item>
+		<item level="0" text="Add Samsung channels to bouquets" description="Select 'Yes' to add the Samsung VOD channels to the bouquet.">config.plugins.PlutoTV.addSamsung</item>
+		<item level="0" text="Add Xiaomi channels to bouquets" description="Select 'Yes' to add the Xiaomi VOD channels to the bouquet.">config.plugins.PlutoTV.addXiaomi</item>
+		<item level="0" text="Live TV mode" description="Select the operating mode.">config.plugins.PlutoTV.liveMode</item>
+		<item level="0" text="Live TV channel numbering" description="Select the service numbering scheme.">config.plugins.PlutoTV.channelNumbering</item>
+		<item level="0" text="Add #DESCRIPTION to bouquets" description="Select 'Yes' to add #DESCRIPTION lines to all bouquets created by Pluto TV.">config.plugins.PlutoTV.addDescriptions</item>
+		<item level="0" text="Force picon download" description="Select 'Yes' to force picons to be downloaded from Pluto TV even if they are already locally available.">config.plugins.PlutoTV.forcePiconDownload</item>
+		<item level="0" text="Separate episode details" description="Select 'Yes' to add a blank line between the parts of the episode number, name and description.">config.plugins.PlutoTV.separateEpisode</item>
+		<item level="0" text="Separate other details" description="Select 'Yes' to add a blank line between the parts (cast, writers, directors, producers, release date) of the description.">config.plugins.PlutoTV.separateDetails</item>
+	</setup>
+</setupxml>

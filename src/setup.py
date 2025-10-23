@@ -3,7 +3,7 @@ import setup_translate
 
 pkg = 'Extensions.PlutoTV'
 setup(name='enigma2-plugin-extensions-plutotv',
-       version='2025.0',
+       version='3.0',
        description='PlutoTV for E2',
        package_dir={pkg: 'PlutoTV'},
        packages=[pkg],

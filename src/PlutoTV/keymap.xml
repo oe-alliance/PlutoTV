@@ -1,5 +1,22 @@
 <keymap>
-	<map context="PlutoTV_Actions">
-		<key id="KEY_TV" mapto="leavePlayer" flags="m" />
+	<map context="PlutoActions">
+		<key id="KEY_EXIT" mapto="close" flags="b" />
+		<key id="KEY_EXIT" mapto="closeRecursive" flags="l" />
+		<key id="KEY_MENU" mapto="menu" flags="m" />
+		<key id="KEY_OK" mapto="select" flags="m" />
+		<key id="KEY_BACK" mapto="back" flags="m" />
+		<key id="KEY_RED" mapto="back" flags="m" />
+		<key id="KEY_GREEN" mapto="moviedb" flags="m" />
+		<key id="KEY_YELLOW" mapto="favorite" flags="m" />
+		<key id="KEY_TEXT" mapto="region" flags="m" />
+		<!-- Keyboard specific buttons -->
+		<key id="KEY_ESC" mapto="close" flags="b" />
+		<key id="KEY_ESC" mapto="closeRecursive" flags="l" />
+		<key id="KEY_SPACE" mapto="menu" flags="m" />
+		<key id="KEY_ENTER" mapto="select" flags="m" />
+		<key id="KEY_F5" mapto="back" flags="m" />
+		<key id="KEY_F6" mapto="moviedb" flags="m" />
+		<key id="KEY_F7" mapto="favorite" flags="m" />
+		<key id="KEY_F9" mapto="region" flags="m" />
 	</map>
 </keymap>
