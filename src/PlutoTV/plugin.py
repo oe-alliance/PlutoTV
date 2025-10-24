@@ -69,7 +69,7 @@ from enigma import eDVBDB, eEPGCache, ePicLoad, eServiceCenter, eServiceReferenc
 
 from skin import parseColor
 from Components.ActionMap import HelpableActionMap
-from Components.config import ConfigDirectory, ConfigNumber, ConfigSelection, ConfigSubList, ConfigSubsection, ConfigYesNo, config, getConfigListEntry
+from Components.config import ConfigDirectory, ConfigNumber, ConfigSelection, ConfigSubList, ConfigSubsection, ConfigYesNo, config, getConfigListEntry  # noqa: F401
 try:
 	from Components.International import international
 except ImportError:
@@ -1096,7 +1096,7 @@ class PlutoSetup(Setup):
 	def __init__(self, session):
 		self.choices = list(PLUTO_DATA.keys())
 		self.baseConfigLength = None
-		Setup.__init__(self, session=session, setup="PlutoTV", plugin="Extensions/PlutoTV")
+		Setup.__init__(self, session=session, setup="PlutoTV", plugin="Extensions/PlutoTV", PluginLanguageDomain="PlutoTV")
 		self["key_yellow"] = StaticText()
 		self["key_blue"] = StaticText()
 		description = _("Pluto TV Actions")
@@ -1341,7 +1341,7 @@ class PlutoUpdater:
 					serviceNumbers[identifier] = {}
 					serviceNumbers[identifier]["number"] = number
 					serviceNumbers[identifier]["name"] = name
-					serviceNumbersModified = True
+					# serviceNumbersModified = True
 				else:
 					self.uiUpdate(status=_("Error: Generated channel number too big!  (%s)") % number)
 					number = None
