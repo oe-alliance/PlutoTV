@@ -7,12 +7,10 @@ Copyright (c) 2021-2024 Billy2011 @ vuplus-support.org
 - adaptions for VTI
 - many fixes, improvements, mods & rewrites
 - py3 adaption
-
 20240831 (latest release)
 
-Copyright (c) 2025 jbleyel and IanSav
+Copyright (c) 2025 jbleyel and IanSav - Version 3.0
 
-3.0
 Rewrite Pluto TV plugin
 - Rewrite and optimize all aspects of the Pluto TV plugin.
 - All the code is now in one module.
@@ -20,45 +18,48 @@ Rewrite Pluto TV plugin
 - Move the list of supported regions into an upgradeable XML file.
 - Make the Setup functions a sub-class of Setup.
 - Make the screens fully skin-able.
-- Add an option, via TEXT button, to temporarily view the content for any supported region.
+- Add an option, via TEXT button, to temporarily view the content for any
+  supported region.
 - Make the content list configurable via a skin.
 - Show the number of items in each sub menu.
-- Add options for how to display the show/movie details.  Allow the elements of the details to be colored via a skin.
+- Add options for how to display the show/movie details.  Allow the elements
+  of the details to be colored via a skin.
 - Add dynamic HELP.
 - Allow favorites to be defined separately for each region.
 - Improve the management of region bouquets.
 - Allow Pluto TV to be added to the main menu.
-- Make the pop up to confirm plugin close as optional, now defaulted to off (No).
+- Make the pop up to confirm plugin close as optional, now defaulted to
+  off (No).
 - Make the background bouquet update period configurable.
 - Allow the use of "#DESCRIPTION" lines in bouquets to be optional.
 - Manual updates for the bouquets is now within the Setup screen.
 - Add an option to use LEFT/RIGHT buttons for navigation.
 - Probably more that no longer stands out after all the development time.  ;)
 
- SPDX-License-Identifier: GPL-2.0-or-later
- See LICENSES/README.md for more information.
+SPDX-License-Identifier: GPL-2.0-or-later
+See LICENSES/README.md for more information.
 
- PlutoTV is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
+PlutoTV is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
 
- PlutoTV is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
+PlutoTV is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 
- You should have received a copy of the GNU General Public License
- along with PlutoTV.  If not, see <http://www.gnu.org/licenses/>.
+You should have received a copy of the GNU General Public License along with
+PlutoTV.  If not, see <http://www.gnu.org/licenses/>.
 """
 
+from calendar import timegm
 from os import makedirs, statvfs
 from os.path import exists, getsize, isdir, isfile, join
 from pickle import dump, load
 from re import sub
 from requests import get
 from shutil import copy2
-from time import gmtime, localtime, mktime, sleep, strftime, strptime, time
+from time import gmtime, localtime, sleep, strftime, strptime, time
 from traceback import format_exc
 from twisted.internet import defer, reactor, threads
 from unicodedata import normalize
@@ -106,11 +107,10 @@ MODULE_NAME = __name__.split(".")[-1]
 PLUTO_USER_AGENT = {"User-agent": "Mozilla/5.0 (Windows NT 6.2; rv:24.0) Gecko/20100101 Firefox/24.0"}
 PLUTO_IMAGE_URL = "https://images.pluto.tv"
 PLUTO_API_URL = "https://api.pluto.tv"
-PLUTO_VOD_URL = f"{PLUTO_API_URL}/v3/vod/categories"
 PLUTO_GUIDE_URL = f"{PLUTO_API_URL}/v2/channels"
 PLUTO_LINEUP_URL = f"{PLUTO_API_URL}/v2/channels"
+PLUTO_VOD_URL = f"{PLUTO_API_URL}/v3/vod/categories"
 PLUTO_SEASON_URL = f"{PLUTO_API_URL}/v3/vod/series/%s/seasons"
-GUIDE_URL = "https://service-channels.clusters.pluto.tv/v1/guide"
 
 PLUTO_FOLDER = "/tmp"
 PLUTO_TIMER_PATH = "/etc/enigma2/PlutoTV_timer"
@@ -685,7 +685,7 @@ class PlutoTV(Screen):
 					data = clip["producers"]
 					section.append(rf"\c{detailsLabel.producersColor:08X}{ngettext("Producer", "Producers", len(data))}: {", ".join(data)}.\c{detailsLabel.detailsColor:08X}")
 				if "originalReleaseDate" in clip:
-					data = strftime(config.usage.date.daylong.value, localtime(mktime(strptime(clip["originalReleaseDate"], "%Y-%m-%dT%H:%M:%SZ"))))
+					data = strftime(config.usage.date.daylong.value, localtime(timegm(strptime(clip["originalReleaseDate"], "%Y-%m-%dT%H:%M:%SZ"))))
 					section.append(rf"\c{detailsLabel.releaseColor:08X}{_("Original release")}: {data}.\c{detailsLabel.detailsColor:08X}")
 				if section:
 					if details:
@@ -1331,6 +1331,7 @@ class PlutoUpdater:
 
 	def updateThread(self):
 		def assignNumber():
+			nonlocal serviceNumbers, serviceNumbersModified
 			if identifier in serviceNumbers:
 				number = serviceNumbers[identifier]["number"]
 			else:
@@ -1341,7 +1342,7 @@ class PlutoUpdater:
 					serviceNumbers[identifier] = {}
 					serviceNumbers[identifier]["number"] = number
 					serviceNumbers[identifier]["name"] = name
-					# serviceNumbersModified = True
+					serviceNumbersModified = True
 				else:
 					self.uiUpdate(status=_("Error: Generated channel number too big!  (%s)") % number)
 					number = None
@@ -1569,22 +1570,19 @@ class PlutoUpdater:
 					startTime = gmtime()
 					param = {
 						"start": strftime("%Y-%m-%dT%H:00:00Z", startTime),
-						"stop": strftime("%Y-%m-%dT%H:00:00Z", gmtime(mktime(startTime) + 86400)),  # UTC startTime + 24 Hours.
+						"stop": strftime("%Y-%m-%dT%H:00:00Z", gmtime(timegm(startTime) + 86400)),  # UTC startTime + 24 Hours.
 						"deviceId": DEVICEID1_HEX,
 						"sid": SID1_HEX,
 					}
-					header = PLUTO_USER_AGENT
+					header = buildHeader(PLUTO_DATA[region][PLUTO_IP])
 					# Does the list of guides data need to be sorted?
-					# guides = fetchURL(PLUTO_GUIDE_URL, header=header, param=param)
 					guides = sorted(fetchURL(PLUTO_GUIDE_URL, header=header, param=param), key=lambda x: x["number"])
 					# guidesDump(region, guides)
 					guidesCount = len(guides)
 					if self.abort:
 						break
-					offset = mktime(localtime()) - mktime(gmtime())  # Calculate the time offset from UTC to local time.
-					# print(f"[PlutoTV] DEBUG: guides={len(guides)}, filter={len(list(filter(lambda x: x.get("_id"), guides)))}.")
 					# Why do we need to filter the guides?  Don't all entries have an identifier?
-					for icnt, guide in enumerate(filter(lambda x: x.get("_id"), guides)):
+					for counter, guide in enumerate(filter(lambda x: x.get("_id"), guides)):
 						# identifier = guide.get("_id", "")
 						# slug = guide.get("slug", "")
 						# name = guide.get("name", "")
@@ -1618,7 +1616,7 @@ class PlutoUpdater:
 							break
 						identifier = guide.get("_id")
 						name = guide.get("name", _("* Unknown *"))
-						self.uiUpdate(progress=icnt * 50 // guidesCount + 50, status=_("Processing '%s' guides.") % name, pause=0.1)
+						self.uiUpdate(progress=counter * 50 // guidesCount + 50, status=_("Processing '%s' guides.") % name, pause=0.1)
 						genres = set()
 						guideList[identifier] = []
 						timelines = guide.get("timelines", [])
@@ -1670,7 +1668,7 @@ class PlutoUpdater:
 							episode = timeline.get("episode", {}) or timeline
 							series = episode.get("series", {}) or timeline
 							duration = int(episode.get("duration", "0") or "0") // 1000  # In seconds.
-							start = mktime(strptime(timeline["start"], "%Y-%m-%dT%H:%M:%S.%fZ")) + offset
+							start = timegm(strptime(timeline["start"], "%Y-%m-%dT%H:%M:%S.%fZ"))
 							title = series.get("name", "") or timeline.get("title", "")
 							tvPlot = series.get("description", "") or series.get("summary", "") or guide.get("description", "") or guide.get("summary", "")
 							episodeSeason = episode.get("season", 0)
