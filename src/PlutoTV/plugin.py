@@ -1358,7 +1358,6 @@ class PlutoUpdater:
 		result = self.EXIT_DONE
 		bouquetRegionList = self.bouquetRegionList if self.bouquetRegionList else [x.value for x in config.plugins.PlutoTV.bouquetRegion]
 		serviceTypes = {config.plugins.PlutoTV.bouquetRegion[x].value: config.plugins.PlutoTV.bouquetService[x].value for x in range(config.plugins.PlutoTV.bouquetCount.value)}
-		print(f"[PlutoTV] DEBUG: serviceTypes={serviceTypes}")
 		categories = []
 		channelList = {}
 		guideList = {}
