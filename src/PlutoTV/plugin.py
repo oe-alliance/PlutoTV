@@ -1357,7 +1357,7 @@ class PlutoUpdater:
 		print("[PlutoTV] Carousel update started.")
 		result = self.EXIT_DONE
 		bouquetRegionList = self.bouquetRegionList if self.bouquetRegionList else [x.value for x in config.plugins.PlutoTV.bouquetRegion]
-		serviceTypes = dict([(config.plugins.PlutoTV.bouquetRegion[x].value, config.plugins.PlutoTV.bouquetService[x].value) for x in range(len(config.plugins.PlutoTV.bouquetRegion))])
+		serviceTypes = {(config.plugins.PlutoTV.bouquetRegion[x].value, config.plugins.PlutoTV.bouquetService[x].value) for x in range(len(config.plugins.PlutoTV.bouquetRegion))}
 		categories = []
 		channelList = {}
 		guideList = {}
