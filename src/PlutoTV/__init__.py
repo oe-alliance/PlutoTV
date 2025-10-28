@@ -13,12 +13,12 @@ def localeInit():
 	bindtextdomain(PluginLanguageDomain, resolveFilename(SCOPE_PLUGINS, PluginLanguagePath))
 
 
-def _(txt):
-	if dgettext(PluginLanguageDomain, txt):
-		return dgettext(PluginLanguageDomain, txt)
+def _(text):
+	if translated := dgettext(PluginLanguageDomain, text):
+		return translated
 	else:
-		# print("[" + PluginLanguageDomain + "] fallback to default translation for " + txt)
-		return gettext(txt)
+		# print(f"[{PluginLanguageDomain}] fallback to default translation for {text}")
+		return gettext(text)
 
 
 localeInit()

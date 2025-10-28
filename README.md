@@ -50,7 +50,6 @@ This plugin was developed with a lot of 💞 for the Enigma2 community. You are 
 [![Pull Requests Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat)](https://github.com/oe-alliance/PlutoTV/pulls)
 [![Plugin Version](https://img.shields.io/github/v/tag/oe-alliance/PlutoTV?label=Latest%20Version&color=darkviolet)](https://github.com/oe-alliance/PlutoTV/tags)
 [![Latest Release](https://img.shields.io/github/release-date/oe-alliance/PlutoTV?label=From&color=darkviolet)](https://github.com/oe-alliance/PlutoTV/releases/latest)
-[![GitHub all releases](https://img.shields.io/github/downloads/oe-alliance/PlutoTV/total.svg?label=Downloads)](https://github.com/oe-alliance/PlutoTV/releases)
 [![Github last commit](https://img.shields.io/github/last-commit/oe-alliance/PlutoTV)](https://github.com/oe-alliance/PlutoTV)
 [![GitHub Activity](https://img.shields.io/github/commit-activity/y/oe-alliance/PlutoTV.svg?label=commits)](https://github.com/oe-alliance/PlutoTV/commits)
 [![GitHub Activity](https://img.shields.io/github/commit-activity/m/oe-alliance/PlutoTV.svg?label=commits)](https://github.com/oe-alliance/PlutoTV/commits)
