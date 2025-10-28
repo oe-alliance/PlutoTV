@@ -9,7 +9,7 @@ Copyright (c) 2021-2024 Billy2011 @ vuplus-support.org
 - py3 adaption
 20240831 (latest release)
 
-Copyright (c) 2025 jbleyel and IanSav - Version 3.0
+Copyright (c) 2025 jbleyel and IanSav - Version 3.0.1
 
 Rewrite Pluto TV plugin
 - Rewrite and optimize all aspects of the Pluto TV plugin.
@@ -1357,9 +1357,7 @@ class PlutoUpdater:
 		print("[PlutoTV] Carousel update started.")
 		result = self.EXIT_DONE
 		bouquetRegionList = self.bouquetRegionList if self.bouquetRegionList else [x.value for x in config.plugins.PlutoTV.bouquetRegion]
-		serviceTypes = {}
-		for index in range(len(config.plugins.PlutoTV.bouquetRegion)):
-			serviceTypes[config.plugins.PlutoTV.bouquetRegion[index].value] = config.plugins.PlutoTV.bouquetService[index].value
+		serviceTypes = dict([(config.plugins.PlutoTV.bouquetRegion[x].value, config.plugins.PlutoTV.bouquetService[x].value) for x in range(len(config.plugins.PlutoTV.bouquetRegion))])
 		categories = []
 		channelList = {}
 		guideList = {}
@@ -1390,8 +1388,6 @@ class PlutoUpdater:
 						serviceNumbers = load(fd)
 				except OSError as err:
 					print(f"[PlutoTV] Error {err.errno}: Unable to load service numbers '{PLUTO_SERVICE_NUMBER_PATH}'!  ({err.strerror})")
-			# else:
-			# 	print(f"[PlutoTV] DEBUG: No service numbers to load, service number file '{PLUTO_SERVICE_NUMBER_PATH}' doesn't exist.")
 			for region in bouquetRegionList:
 				if self.abort:
 					break
@@ -1442,9 +1438,7 @@ class PlutoUpdater:
 					if self.abort:
 						break
 					category = channel.get("category", "")
-					if category == "Samsung" and not addSamsung:
-						continue
-					if category == "Xiaomi TV" and not addXiaomi:
+					if (category == "Samsung" and not addSamsung) or (category == "Xiaomi TV" and not addXiaomi):
 						continue
 					urls = channel.get("stitched", {}).get("urls")
 					if not isinstance(urls, list) or len(urls) == 0:
@@ -1453,16 +1447,16 @@ class PlutoUpdater:
 					identifier = channel["_id"]
 					match self.liveMode:
 						case "original":
-							urls = [updateQuery(url["url"], {
+							url = [updateQuery(x["url"], {
 								"deviceType": "web",
 								"deviceMake": "Chrome",
 								"deviceModel": "web",
 								"appName": "web",
 								"deviceId": "bc83a564-4b91-11ef-8a44-83c5e90e038f"
-							}) for url in urls if url["type"].lower() == "hls"][0]
+							}) for x in urls if x["type"].lower() == "hls"][0]
 						case "roku":
-							urls = "&".join((
-								f"http%3a//stitcher-ipv4.pluto.tv/v1/stitch/embed/hls/channel/{identifier}/master.m3u8?deviceId=PSID",
+							url = "&".join((
+								f"https%3A//stitcher-ipv4.pluto.tv/v1/stitch/embed/hls/channel/{identifier}/master.m3u8?deviceId=PSID",
 								"deviceModel=web",
 								"deviceVersion=1.0",
 								"appVersion=1.0",
@@ -1471,14 +1465,23 @@ class PlutoUpdater:
 								"deviceDNT=1"
 							))
 						case "samsung":
-							urls = "&".join((
-								f"http%3a//stitcher-ipv4.pluto.tv/v1/stitch/embed/hls/channel/{identifier}/master.m3u8?deviceId=PSID",
-								"deviceModel=web",
-								"deviceVersion=1.0",
-								"appVersion=1.0",
-								"deviceType=rokuChannel",
-								"deviceMake=rokuChannel",
-								"deviceDNT=1"
+							url = "&".join((
+								f"https%3A//stitcher-ipv4.pluto.tv/v1/stitch/embed/hls/channel/{identifier}/master.m3u8?deviceType=samsung-tvplus",
+								"deviceMake=samsung",
+								"deviceModel=samsung",
+								"deviceVersion=unknown",
+								"appVersion=unknown",
+								"deviceLat=0",
+								"deviceLon=0",
+								"deviceDNT=%7BTARGETOPT%7D",
+								"deviceId=%7BPSID%7D",
+								"advertisingId=%7BPSID%7D",
+								"us_privacy=1YNY",
+								"samsung_app_domain=%7BAPP_DOMAIN%7D"
+								"samsung_app_name=%7BAPP_NAME%7D",
+								"profileLimit="
+								"profileFloor=",
+								"embedPartner=samsung-tvplus"
 							))
 					if category not in channelList.keys():
 						categories.append(category)
@@ -1491,8 +1494,10 @@ class PlutoUpdater:
 							case "Xiaomi TV":
 								number = identifier[-4:].upper().lstrip("0")
 							case _:
-								number = channel["number"]
-								if not number:
+								number = channel.get("number", 0)
+								if number:
+									number = f"{int(number):X}"
+								else:
 									number = assignNumber()
 									if number is None:
 										result = self.EXIT_ERROR
@@ -1503,7 +1508,7 @@ class PlutoUpdater:
 							result = self.EXIT_ERROR
 							break
 					piconURL = channel.get("colorLogoPNG", {}).get("path", None)
-					channelList[category].append((number, identifier, name, piconURL, urls))
+					channelList[category].append((number, identifier, name, piconURL, url))
 				if self.abort:
 					break
 				if categories:
@@ -1547,7 +1552,7 @@ class PlutoUpdater:
 							piconPath = join(config.plugins.PlutoTV.piconPath.value, f"{piconBaseName}.png")
 							# print(f"[PlutoTV] DEBUG: piconURL={piconURL}, piconBaseName={piconBaseName}, piconPath={piconPath}.")
 							if "missing.png" in piconURL or "MISSING" in piconURL:
-								# print("[PlutoTV] DEBUG: Don't try fetching the 'missing.png' picon!")
+								# print("[PlutoTV] DEBUG: Don't try fetching the 'missing.png' or 'MISSING' picon!")
 								copy2(resolveFilename(SCOPE_PLUGIN_ABSOLUTE, "images/pluto_picon.png"), piconPath)
 							elif not isfile(piconPath) or config.plugins.PlutoTV.forcePiconDownload.value:
 								# print(f"[PlutoTV] DEBUG: Fetching '{piconURL}' as picon '{piconPath}'.")
@@ -1669,7 +1674,7 @@ class PlutoUpdater:
 							series = episode.get("series", {}) or timeline
 							duration = int(episode.get("duration", "0") or "0") // 1000  # In seconds.
 							start = timegm(strptime(timeline["start"], "%Y-%m-%dT%H:%M:%S.%fZ"))
-							title = series.get("name", "") or timeline.get("title", "")
+							title = series.get("name", "") or episode.get("name", "") or timeline.get("title", "")
 							tvPlot = series.get("description", "") or series.get("summary", "") or guide.get("description", "") or guide.get("summary", "")
 							episodeSeason = episode.get("season", 0)
 							episodeNumber = episode.get("number", 0)
@@ -1702,7 +1707,8 @@ class PlutoUpdater:
 							if genre not in genres:
 								genres.add(genre)
 								guideList[identifier].append([])
-							guideList[identifier][-1].append((int(start), duration, title, "", episodePlot, genre))
+							# StartTime [long], Duration [int], EventTitle, ShortDescription, ExtendedDescription, EventType [byte], EventID [int], ParentalRatings [list of tuples (Country [3 letter string], ParentalRating [byte])]
+							guideList[identifier][-1].append((start, duration, title, "", episodePlot, genre))
 					self.uiUpdate(progress=99)
 					if self.abort:
 						break
@@ -1729,10 +1735,10 @@ class PlutoUpdater:
 					dvbDB.reloadBouquets()
 					print(f"[PlutoTV] Merge EPG for region '{PLUTO_DATA[region][PLUTO_COUNTRY_NAME]}'.")
 					eventCount = 0
-					for channel, serviceReference in serviceReferences.items():
-						for genre in guideList.get(channel, []):
-							eventCount += len(genre)
-							epgCache.importEvents(serviceReference, genre)
+					for identifier, serviceReference in serviceReferences.items():
+						for epgData in guideList.get(identifier, []):
+							eventCount += len(epgData)
+							epgCache.importEvents(serviceReference, epgData)
 					print(f"[PlutoTV] {eventCount} events merged, for {channelCount} channels.")
 					self.uiUpdate(progress=100)
 				else:
