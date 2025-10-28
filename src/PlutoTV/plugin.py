@@ -1477,9 +1477,9 @@ class PlutoUpdater:
 								"deviceId=%7BPSID%7D",
 								"advertisingId=%7BPSID%7D",
 								"us_privacy=1YNY",
-								"samsung_app_domain=%7BAPP_DOMAIN%7D"
+								"samsung_app_domain=%7BAPP_DOMAIN%7D",
 								"samsung_app_name=%7BAPP_NAME%7D",
-								"profileLimit="
+								"profileLimit=",
 								"profileFloor=",
 								"embedPartner=samsung-tvplus"
 							))
