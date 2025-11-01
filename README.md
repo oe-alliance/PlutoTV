@@ -13,6 +13,15 @@ This plugin was developed with a lot of 💞 for the Enigma2 community. You are 
 <summary>Click to show Relases Notes.</summary> 
 
 # Relases Notes:
+**V3.0.1 - 28.10.2025**
+**Small correction and improvements**
+- Correct the Samsung URL.
+- Correct enumeration of serviceTypes dictionary.
+- Ensure bouquet service numbers are in hex.
+- Optimise more code.
+- Improve more variable names for code clarity.
+- Update version number.
+
 **V3.0 - 23.10.2025**
 **Rewrite Pluto TV plugin**
 - Rewrite and optimize all aspects of the Pluto TV plugin.
