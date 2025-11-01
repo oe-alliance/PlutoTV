@@ -1,8 +1,7 @@
 [tool.ruff]
 builtins = ["_", "ngettext"]
-line-length = 1000
 select = ["E","F","W"]
-ignore = ["W191"]
+ignore = ["W191","E501"]
 
 [tool.isort]
 profile = "black"
