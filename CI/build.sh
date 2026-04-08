@@ -6,6 +6,7 @@
 setup_git() {
   git config --global user.email "bot@oe-alliance.com"
   git config --global user.name "oe-alliance python bot"
+  return 0
 }
 
 commit_files() {
@@ -17,11 +18,13 @@ commit_files() {
   ./CI/chmod.sh
   ./CI/dos2unix.sh
   ./CI/PEP8.sh
+  return 0
 }
 
 upload_files() {
-  git remote add upstream https://${GITHUB_TOKEN}@github.com/oe-alliance/PlutoTV.git > /dev/null 2>&1
-  git push --quiet upstream main || echo "failed to push with error $?"
+  git remote add upstream https://${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git > /dev/null 2>&1
+  git push --quiet upstream main || echo "failed to push with error $?" >&2
+  return 0
 }
 
 setup_git
