@@ -1268,7 +1268,7 @@ class PlutoSetup(Setup):
 		else:
 			choices = self.getChoices()
 			config.plugins.PlutoTV.bouquetCount.value += 1
-			default = list(choices)[0]
+			default = choices[0][0]
 			config.plugins.PlutoTV.bouquetRegion.append(ConfigSelection(default=default, choices=choices))
 			config.plugins.PlutoTV.bouquetRegion[-1].value = default
 			config.plugins.PlutoTV.bouquetService.append(ConfigSelection(default="4097", choices=PLUTO_SERVICE_CHOICES))
